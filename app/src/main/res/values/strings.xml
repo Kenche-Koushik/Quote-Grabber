@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Quote Grabber</string>
+    <string name="scan_placeholder">Scanned text will appear here.</string>
 </resources>

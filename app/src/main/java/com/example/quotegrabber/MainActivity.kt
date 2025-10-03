@@ -19,6 +19,7 @@ import java.util.concurrent.Executors
 import android.util.Log
 import android.util.Size
 import android.view.MotionEvent
+import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
@@ -83,6 +84,13 @@ class MainActivity : AppCompatActivity() {
         requestPermissions()
 
         binding.scanButton.setOnClickListener {
+            // Turn off flashlight when scanning starts
+            if (isFlashlightOn) {
+                camera?.cameraControl?.enableTorch(false)
+                isFlashlightOn = false
+                binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
+            }
+
             // Set the flag to true to process the next available frame
             isScanning.set(true)
             binding.recognizedText.text = "Scanning..."
@@ -90,6 +98,15 @@ class MainActivity : AppCompatActivity() {
 
         binding.flashlightButton.setOnClickListener {
             toggleFlashlight()
+        }
+
+        // --- NEW: Set up listener for the full-screen results view ---
+        binding.resultsContainer.setOnClickListener {
+            // Hide the results view and show the camera view
+            binding.resultsContainer.visibility = View.GONE
+            binding.cameraUiContainer.visibility = View.VISIBLE
+            // Reset the text in the small preview
+            binding.recognizedText.text = getString(R.string.scan_placeholder)
         }
     }
 
@@ -218,9 +235,14 @@ class MainActivity : AppCompatActivity() {
     private fun processTextBlock(result: Text) {
         val resultText = result.text
         if (resultText.isEmpty()) {
-            binding.recognizedText.text = "No text found."
+            // If no text is found, show a quick message and stay on the camera screen
+            Toast.makeText(this, "No text found", Toast.LENGTH_SHORT).show()
+            binding.recognizedText.text = getString(R.string.scan_placeholder)
         } else {
-            binding.recognizedText.text = resultText
+            // --- NEW: If text is found, switch to the full-screen results view ---
+            binding.fullScreenText.text = resultText
+            binding.resultsContainer.visibility = View.VISIBLE
+            binding.cameraUiContainer.visibility = View.GONE
         }
     }
 
