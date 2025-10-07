@@ -2,6 +2,12 @@ package com.example.quotegrabber
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.YuvImage
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -22,6 +28,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
@@ -33,6 +40,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import java.io.ByteArrayOutputStream
 
 class MainActivity : AppCompatActivity() {
 
@@ -100,12 +108,10 @@ class MainActivity : AppCompatActivity() {
             toggleFlashlight()
         }
 
-        // --- NEW: Set up listener for the full-screen results view ---
-        binding.resultsContainer.setOnClickListener {
-            // Hide the results view and show the camera view
+        // Updated listener to point to the new button
+        binding.scanAgainButton.setOnClickListener {
             binding.resultsContainer.visibility = View.GONE
             binding.cameraUiContainer.visibility = View.VISIBLE
-            // Reset the text in the small preview
             binding.recognizedText.text = getString(R.string.scan_placeholder)
         }
     }
@@ -215,35 +221,75 @@ class MainActivity : AppCompatActivity() {
             textRecognizer.process(image)
                 .addOnSuccessListener { visionText ->
                     // Task completed successfully
-                    processTextBlock(visionText)
+                    // Pass imageProxy along with the text result
+                    processTextBlock(visionText, imageProxy)
                 }
                 .addOnFailureListener { e ->
                     // Task failed with an exception
                     Log.e(TAG, "Text recognition failed", e)
                     binding.recognizedText.text = "Failed to recognize text."
+                    imageProxy.close() // Close proxy on failure
                 }
                 .addOnCompleteListener {
-                    // Reset the flag and close the proxy regardless of success or failure.
                     isScanning.set(false)
-                    imageProxy.close()
+                    // Proxy is now closed in success/failure branches
                 }
         } else {
             imageProxy.close()
         }
     }
 
-    private fun processTextBlock(result: Text) {
-        val resultText = result.text
-        if (resultText.isEmpty()) {
-            // If no text is found, show a quick message and stay on the camera screen
-            Toast.makeText(this, "No text found", Toast.LENGTH_SHORT).show()
-            binding.recognizedText.text = getString(R.string.scan_placeholder)
-        } else {
-            // --- NEW: If text is found, switch to the full-screen results view ---
-            binding.fullScreenText.text = resultText
-            binding.resultsContainer.visibility = View.VISIBLE
-            binding.cameraUiContainer.visibility = View.GONE
+    private fun processTextBlock(result: Text, imageProxy: ImageProxy) {
+        try {
+            val resultText = result.text
+            if (resultText.isEmpty()) {
+                Toast.makeText(this, "No text found", Toast.LENGTH_SHORT).show()
+                binding.recognizedText.text = getString(R.string.scan_placeholder)
+            } else {
+                // Convert the captured frame to a bitmap
+                val bitmap = imageProxyToBitmap(imageProxy)
+
+                // Update the UI on the main thread
+                runOnUiThread {
+                    binding.scannedImageView.setImageBitmap(bitmap)
+                    binding.fullScreenText.text = resultText
+                    binding.resultsContainer.visibility = View.VISIBLE
+                    binding.cameraUiContainer.visibility = View.GONE
+                }
+            }
+        } finally {
+            // Ensure the ImageProxy is closed to allow the next frame to be processed.
+            imageProxy.close()
         }
+    }
+
+    // Helper function to convert ImageProxy to a Bitmap
+    @OptIn(ExperimentalGetImage::class)
+    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
+        val image = imageProxy.image!!
+        val yBuffer = image.planes[0].buffer // Y
+        val uBuffer = image.planes[1].buffer // U
+        val vBuffer = image.planes[2].buffer // V
+
+        val ySize = yBuffer.remaining()
+        val uSize = uBuffer.remaining()
+        val vSize = vBuffer.remaining()
+
+        val nv21 = ByteArray(ySize + uSize + vSize)
+
+        yBuffer.get(nv21, 0, ySize)
+        vBuffer.get(nv21, ySize, vSize)
+        uBuffer.get(nv21, ySize + vSize, uSize)
+
+        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
+        val out = ByteArrayOutputStream()
+        yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 100, out)
+        val imageBytes = out.toByteArray()
+        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+
+        // Rotate the bitmap to match the screen orientation
+        val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()) }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
     override fun onDestroy() {
