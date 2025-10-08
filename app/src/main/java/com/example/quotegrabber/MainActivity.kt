@@ -50,13 +50,20 @@ class MainActivity : AppCompatActivity() {
     private val isScanning = AtomicBoolean(false)
     private var camera: Camera? = null
     private var isFlashlightOn = false
+    private var cropRect: Rect? = null
 
-    // New, modern way to handle permission requests.
+    // --- Improvement: Variables for a faster, more reliable Smart Scan ---
+    private var potentialReading: String? = null
+    private var stableFrames = 0
+    private val REQUIRED_STABLE_FRAMES = 2 // Reduced from 3 for faster lock-on
+    private val SCAN_TIMEOUT_MS = 5000L // 5 seconds
+    private var scanStartTime = 0L
+
+
     private val activityResultLauncher =
         registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions())
         { permissions ->
-            // Handle Permission granted/denied
             var permissionGranted = true
             permissions.entries.forEach {
                 if (it.key in REQUIRED_PERMISSIONS && !it.value)
@@ -71,48 +78,52 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
         enableEdgeToEdge()
-        setContentView(R.layout.activity_main)
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
+        ViewCompat.setOnApplyWindowInsetsListener(binding.main) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
 
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-
-        // Initialize ML Kit Text Recognizer
-        textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-
-        // Setup camera executor
+        textRecognizer = TextRecognition.getClient(com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS)
         cameraExecutor = Executors.newSingleThreadExecutor()
-
-        // Request camera permission
         requestPermissions()
 
         binding.scanButton.setOnClickListener {
-            // Turn off flashlight when scanning starts
             if (isFlashlightOn) {
                 camera?.cameraControl?.enableTorch(false)
                 isFlashlightOn = false
                 binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
             }
-
-            // Set the flag to true to process the next available frame
+            // Reset state for the new scan
+            potentialReading = null
+            stableFrames = 0
             isScanning.set(true)
-            binding.recognizedText.text = "Scanning..."
+            scanStartTime = System.currentTimeMillis() // Start the timeout timer
+            binding.recognizedText.text = "Scanning... Hold steady."
+
+            // --- New: Disable the button while scanning ---
+            binding.scanButton.isEnabled = false
         }
 
         binding.flashlightButton.setOnClickListener {
             toggleFlashlight()
         }
 
-        // Updated listener to point to the new button
         binding.scanAgainButton.setOnClickListener {
+            // Reset state for the new scan
+            potentialReading = null
+            stableFrames = 0
+            isScanning.set(false)
             binding.resultsContainer.visibility = View.GONE
             binding.cameraUiContainer.visibility = View.VISIBLE
             binding.recognizedText.text = getString(R.string.scan_placeholder)
+
+            // --- New: Re-enable the scan button ---
+            binding.scanButton.isEnabled = true
         }
     }
 
@@ -127,8 +138,6 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             try {
                 val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
-
-                // Preview UseCase
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(binding.cameraPreview.surfaceProvider)
                 }
@@ -141,7 +150,6 @@ class MainActivity : AppCompatActivity() {
                         )
                     ).build()
 
-                // ImageAnalysis UseCase
                 val imageAnalysis = ImageAnalysis.Builder()
                     .setResolutionSelector(resolutionSelector)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -150,29 +158,23 @@ class MainActivity : AppCompatActivity() {
                         it.setAnalyzer(cameraExecutor, ::analyzeImage)
                     }
 
-                // Select back camera as a default
                 val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-                // Unbind use cases before rebinding
                 cameraProvider.unbindAll()
-
-                // Bind use cases to camera and store the camera instance
                 camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
 
-                // Check for flash unit and update UI
-                setupFlashlightButton()
+                setupCameraControls()
 
-                // Implement Tap-to-Focus
+                binding.framingGuide.post { updateCropRect() }
+
                 binding.cameraPreview.setOnTouchListener { view, motionEvent ->
                     if (motionEvent.action == MotionEvent.ACTION_DOWN) {
                         val factory = binding.cameraPreview.meteringPointFactory
                         val point = factory.createPoint(motionEvent.x, motionEvent.y)
                         val action = FocusMeteringAction.Builder(point).build()
                         camera?.cameraControl?.startFocusAndMetering(action)
-                        // Call performClick for accessibility standards
                         view.performClick()
                     }
-                    true // Return true to indicate the event was handled
+                    true
                 }
 
             } catch (exc: Exception) {
@@ -182,11 +184,39 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun setupFlashlightButton() {
+    private fun setupCameraControls() {
+        val zoomState = camera?.cameraInfo?.zoomState?.value
+        if (zoomState != null) {
+            binding.zoomSlider.valueFrom = zoomState.minZoomRatio
+            binding.zoomSlider.valueTo = zoomState.maxZoomRatio
+            binding.zoomSlider.stepSize = 0.1f
+            binding.zoomSlider.value = zoomState.zoomRatio
+            binding.zoomSlider.addOnChangeListener { _, value, _ ->
+                camera?.cameraControl?.setZoomRatio(value)
+            }
+        } else {
+            binding.zoomSlider.visibility = View.GONE
+        }
+
         val hasFlash = camera?.cameraInfo?.hasFlashUnit() ?: false
         binding.flashlightButton.isEnabled = hasFlash
         if(!hasFlash) {
-            binding.flashlightButton.alpha = 0.5f // Visually indicate it's disabled
+            binding.flashlightButton.alpha = 0.5f
+        }
+    }
+
+    private fun updateCropRect() {
+        val previewView = binding.cameraPreview
+        val framingGuide = binding.framingGuide
+        val previewWidth = previewView.width
+        val previewHeight = previewView.height
+        val guideLeft = framingGuide.left
+        val guideTop = framingGuide.top
+        val guideWidth = framingGuide.width
+        val guideHeight = framingGuide.height
+
+        if (previewWidth > 0 && previewHeight > 0 && guideWidth > 0 && guideHeight > 0) {
+            cropRect = Rect(guideLeft, guideTop, guideLeft + guideWidth, guideTop + guideHeight)
         }
     }
 
@@ -195,99 +225,155 @@ class MainActivity : AppCompatActivity() {
             if(it.cameraInfo.hasFlashUnit()) {
                 isFlashlightOn = !isFlashlightOn
                 it.cameraControl.enableTorch(isFlashlightOn)
-                if (isFlashlightOn) {
-                    binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_on)
-                } else {
-                    binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
-                }
+                binding.flashlightButton.setImageResource(
+                    if (isFlashlightOn) R.drawable.ic_flashlight_on else R.drawable.ic_flashlight_off
+                )
             }
         }
     }
 
-    // Use @OptIn to acknowledge the use of an experimental API.
-    @androidx.annotation.OptIn(ExperimentalGetImage::class)
+    @OptIn(ExperimentalGetImage::class)
     private fun analyzeImage(imageProxy: ImageProxy) {
-        // If the scan button was not clicked, do not process the frame.
         if (!isScanning.get()) {
             imageProxy.close()
             return
         }
 
-        val mediaImage = imageProxy.image
-        if (mediaImage != null) {
-            val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+        val fullBitmap = imageProxyToBitmap(imageProxy)
+        val imageToProcess: Bitmap
 
-            // Process image with ML Kit
-            textRecognizer.process(image)
-                .addOnSuccessListener { visionText ->
-                    // Task completed successfully
-                    // Pass imageProxy along with the text result
-                    processTextBlock(visionText, imageProxy)
-                }
-                .addOnFailureListener { e ->
-                    // Task failed with an exception
-                    Log.e(TAG, "Text recognition failed", e)
-                    binding.recognizedText.text = "Failed to recognize text."
-                    imageProxy.close() // Close proxy on failure
-                }
-                .addOnCompleteListener {
-                    isScanning.set(false)
-                    // Proxy is now closed in success/failure branches
-                }
+        if (cropRect != null) {
+            val previewWidth = binding.cameraPreview.width.toFloat()
+            val previewHeight = binding.cameraPreview.height.toFloat()
+            val bitmapWidth = fullBitmap.width.toFloat()
+            val bitmapHeight = fullBitmap.height.toFloat()
+            val scaleX = bitmapWidth / previewWidth
+            val scaleY = bitmapHeight / previewHeight
+            val cropLeft = (cropRect!!.left * scaleX).toInt()
+            val cropTop = (cropRect!!.top * scaleY).toInt()
+            val cropWidth = (cropRect!!.width() * scaleX).toInt()
+            val cropHeight = (cropRect!!.height() * scaleY).toInt()
+
+            if (cropLeft + cropWidth <= fullBitmap.width && cropTop + cropHeight <= fullBitmap.height) {
+                imageToProcess = Bitmap.createBitmap(fullBitmap, cropLeft, cropTop, cropWidth, cropHeight)
+            } else {
+                imageToProcess = fullBitmap
+            }
         } else {
-            imageProxy.close()
+            imageToProcess = fullBitmap
         }
+
+        val image = InputImage.fromBitmap(imageToProcess, 0)
+        textRecognizer.process(image)
+            .addOnSuccessListener { visionText ->
+                processTextBlock(visionText, fullBitmap)
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Text recognition failed", e)
+            }
+            .addOnCompleteListener {
+                imageProxy.close()
+            }
     }
 
-    private fun processTextBlock(result: Text, imageProxy: ImageProxy) {
-        try {
-            val resultText = result.text
-            if (resultText.isEmpty()) {
-                Toast.makeText(this, "No text found", Toast.LENGTH_SHORT).show()
-                binding.recognizedText.text = getString(R.string.scan_placeholder)
-            } else {
-                // Convert the captured frame to a bitmap
-                val bitmap = imageProxyToBitmap(imageProxy)
+    private fun processTextBlock(result: Text, fullBitmapForDisplay: Bitmap) {
+        if (!isScanning.get()) return // If user has cancelled, do nothing.
 
-                // Update the UI on the main thread
-                runOnUiThread {
-                    binding.scannedImageView.setImageBitmap(bitmap)
-                    binding.fullScreenText.text = resultText
+        val currentReading = extractMeterReading(result)
+
+        runOnUiThread {
+            // Check for timeout
+            if (System.currentTimeMillis() - scanStartTime > SCAN_TIMEOUT_MS) {
+                isScanning.set(false)
+                binding.scanButton.isEnabled = true // Re-enable on timeout
+                // If we found at least one potential reading, use it as a fallback.
+                if (potentialReading != null) {
+                    binding.scannedImageView.setImageBitmap(fullBitmapForDisplay)
+                    binding.fullScreenText.text = potentialReading
+                    binding.resultsContainer.visibility = View.VISIBLE
+                    binding.cameraUiContainer.visibility = View.GONE
+                } else {
+                    Toast.makeText(this, "Could not find a stable reading. Please try again.", Toast.LENGTH_SHORT).show()
+                    binding.recognizedText.text = getString(R.string.scan_placeholder)
+                }
+                return@runOnUiThread
+            }
+
+
+            if (currentReading != null) {
+                binding.recognizedText.text = "Found: $currentReading"
+                if (currentReading == potentialReading) {
+                    stableFrames++
+                } else {
+                    potentialReading = currentReading
+                    stableFrames = 1
+                }
+
+                if (stableFrames >= REQUIRED_STABLE_FRAMES) {
+                    isScanning.set(false) // Stop scanning
+                    binding.scanButton.isEnabled = true // Re-enable on success
+                    binding.scannedImageView.setImageBitmap(fullBitmapForDisplay)
+                    binding.fullScreenText.text = potentialReading
                     binding.resultsContainer.visibility = View.VISIBLE
                     binding.cameraUiContainer.visibility = View.GONE
                 }
             }
-        } finally {
-            // Ensure the ImageProxy is closed to allow the next frame to be processed.
-            imageProxy.close()
         }
     }
 
-    // Helper function to convert ImageProxy to a Bitmap
+    private fun extractMeterReading(result: Text): String? {
+        var bestCandidate: String? = null
+        var bestScore = -1
+
+        for (block in result.textBlocks) {
+            for (line in block.lines) {
+                for (element in line.elements) {
+                    val text = element.text
+                    val cleanedText = text.replace("O", "0", ignoreCase = true)
+                        .replace("I", "1", ignoreCase = true)
+                        .replace("S", "5", ignoreCase = true)
+                        .replace("B", "8", ignoreCase = true)
+                        .replace("Z", "2", ignoreCase = true)
+
+                    if (cleanedText.contains("kWh", ignoreCase = true)) {
+                        val kwhPattern = Regex("""(\d+\.?\d*)""")
+                        val match = kwhPattern.find(cleanedText)
+                        if (match != null && bestScore < 1) {
+                            bestScore = 1
+                            bestCandidate = match.groupValues[1]
+                        }
+                    }
+
+                    val numericPattern = Regex("""\b(\d{4,7}(?:\.\d{1,2})?)\b""")
+                    val numericMatch = numericPattern.find(cleanedText)
+                    if (numericMatch != null && bestScore < 0) {
+                        bestScore = 0
+                        bestCandidate = numericMatch.groupValues[1]
+                    }
+                }
+            }
+        }
+        return bestCandidate
+    }
+
     @OptIn(ExperimentalGetImage::class)
     private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
         val image = imageProxy.image!!
-        val yBuffer = image.planes[0].buffer // Y
-        val uBuffer = image.planes[1].buffer // U
-        val vBuffer = image.planes[2].buffer // V
-
+        val yBuffer = image.planes[0].buffer
+        val uBuffer = image.planes[1].buffer
+        val vBuffer = image.planes[2].buffer
         val ySize = yBuffer.remaining()
         val uSize = uBuffer.remaining()
         val vSize = vBuffer.remaining()
-
         val nv21 = ByteArray(ySize + uSize + vSize)
-
         yBuffer.get(nv21, 0, ySize)
         vBuffer.get(nv21, ySize, vSize)
         uBuffer.get(nv21, ySize + vSize, uSize)
-
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
         val out = ByteArrayOutputStream()
         yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 100, out)
         val imageBytes = out.toByteArray()
         val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-
-        // Rotate the bitmap to match the screen orientation
         val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()) }
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }

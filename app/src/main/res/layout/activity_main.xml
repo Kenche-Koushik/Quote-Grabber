@@ -5,162 +5,185 @@
     android:id="@+id/main"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@android:color/black"
     tools:context=".MainActivity">
 
-    <!-- Container for all camera-related UI elements -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/camera_ui_container"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent">
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
 
         <androidx.camera.view.PreviewView
             android:id="@+id/camera_preview"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
 
+        <!-- Improvement 1: Framing guide to help the user position the meter -->
         <View
+            android:id="@+id/framing_guide"
             android:layout_width="0dp"
-            android:layout_height="0dp"
-            android:background="#80000000"
-            app:layout_constraintBottom_toBottomOf="@id/bottom_guideline"
+            android:layout_height="100dp"
+            android:layout_marginStart="32dp"
+            android:layout_marginEnd="32dp"
+            android:background="@drawable/framing_border"
+            app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
+
+        <TextView
+            android:id="@+id/framing_text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:background="#80000000"
+            android:padding="8dp"
+            android:text="Position meter reading inside the box"
+            android:textColor="@android:color/white"
+            app:layout_constraintBottom_toTopOf="@+id/framing_guide"
+            app:layout_constraintEnd_toEndOf="@+id/framing_guide"
+            app:layout_constraintStart_toStartOf="@+id/framing_guide" />
+
 
         <androidx.constraintlayout.widget.ConstraintLayout
+            android:id="@+id/bottom_panel"
             android:layout_width="0dp"
             android:layout_height="0dp"
-            android:background="#B3000000"
-            android:padding="16dp"
+            android:background="#A6000000"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toTopOf="@id/bottom_guideline">
+            app:layout_constraintHeight_percent="0.25"
+            app:layout_constraintStart_toStartOf="parent">
 
-            <ScrollView
-                android:id="@+id/text_scroll_view"
+            <!-- New: Zoom Slider -->
+            <com.google.android.material.slider.Slider
+                android:id="@+id/zoom_slider"
                 android:layout_width="0dp"
-                android:layout_height="0dp"
-                android:layout_marginBottom="16dp"
-                android:background="@drawable/rounded_background"
-                android:padding="12dp"
-                app:layout_constraintBottom_toTopOf="@id/scan_button"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:layout_marginEnd="16dp"
+                android:stepSize="0.1"
+                android:value="1.0"
+                android:valueFrom="1.0"
+                android:valueTo="5.0"
+                app:layout_constraintBottom_toTopOf="@+id/scan_button"
                 app:layout_constraintEnd_toEndOf="parent"
                 app:layout_constraintStart_toStartOf="parent"
-                app:layout_constraintTop_toTopOf="parent">
+                app:layout_constraintTop_toTopOf="parent" />
+
+            <ImageButton
+                android:id="@+id/flashlight_button"
+                android:layout_width="60dp"
+                android:layout_height="60dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Toggle Flashlight"
+                android:padding="12dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_flashlight_off"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toStartOf="@+id/scan_button"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/zoom_slider"
+                app:tint="@android:color/white" />
+
+            <Button
+                android:id="@+id/scan_button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Scan Text"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/zoom_slider" />
+
+            <ScrollView
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:layout_marginStart="16dp"
+                android:layout_marginEnd="16dp"
+                android:visibility="gone"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintStart_toEndOf="@+id/scan_button"
+                app:layout_constraintTop_toBottomOf="@id/zoom_slider">
 
                 <TextView
                     android:id="@+id/recognized_text"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Click To scan the text"
-                    android:textColor="@android:color/white"
-                    android:textSize="16sp" />
+                    android:text="@string/scan_placeholder"
+                    android:textColor="#B3FFFFFF"
+                    android:textSize="12sp" />
             </ScrollView>
-
-            <Button
-                android:id="@+id/scan_button"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:text="Scan Text"
-                android:padding="12dp"
-                android:layout_marginEnd="8dp"
-                app:layout_constraintBottom_toBottomOf="parent"
-                app:layout_constraintEnd_toStartOf="@id/flashlight_button"
-                app:layout_constraintStart_toStartOf="parent" />
-
-            <ImageButton
-                android:id="@+id/flashlight_button"
-                android:layout_width="50dp"
-                android:layout_height="50dp"
-                android:src="@drawable/ic_flashlight_off"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="Toggle Flashlight"
-                app:tint="@android:color/white"
-                app:layout_constraintBottom_toBottomOf="@id/scan_button"
-                app:layout_constraintEnd_toEndOf="parent"
-                app:layout_constraintTop_toTopOf="@id/scan_button" />
 
         </androidx.constraintlayout.widget.ConstraintLayout>
 
-        <androidx.constraintlayout.widget.Guideline
-            android:id="@+id/bottom_guideline"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            app:layout_constraintGuide_percent="0.8" />
-
     </androidx.constraintlayout.widget.ConstraintLayout>
 
-    <!-- Full-screen container for showing the results. Initially hidden. -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/results_container"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="#E6000000"
-        android:padding="16dp"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#2C2C2C"
         android:visibility="gone"
-        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
         tools:visibility="visible">
 
         <ImageView
-            android:id="@+id/scanned_image_view"
+            android:id="@+id/scannedImageView"
             android:layout_width="0dp"
             android:layout_height="0dp"
-            android:layout_marginBottom="16dp"
             android:scaleType="fitCenter"
-            app:layout_constraintBottom_toTopOf="@+id/result_guideline"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintHeight_percent="0.3"
             app:layout_constraintTop_toTopOf="parent"
-            tools:src="@tools:sample/backgrounds/scenic" />
-
-        <androidx.constraintlayout.widget.Guideline
-            android:id="@+id/result_guideline"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            app:layout_constraintGuide_percent="0.4" />
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            tools:srcCompat="@tools:sample/backgrounds/scenic" />
 
         <TextView
-            android:id="@+id/result_title"
+            android:id="@+id/result_label"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Recognized Text"
-            android:textColor="@android:color/white"
-            android:textSize="18sp"
+            android:layout_marginTop="16dp"
+            android:text="DETECTED READING"
+            android:textColor="#9A9A9A"
+            android:textSize="16sp"
             android:textStyle="bold"
+            app:layout_constraintTop_toBottomOf="@id/scannedImageView"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/result_guideline" />
+            app:layout_constraintEnd_toEndOf="parent"/>
 
         <ScrollView
+            android:id="@+id/result_scroll_view"
             android:layout_width="0dp"
             android:layout_height="0dp"
-            android:layout_marginTop="8dp"
-            android:layout_marginBottom="16dp"
-            android:background="@drawable/rounded_background"
-            android:padding="12dp"
-            app:layout_constraintBottom_toTopOf="@id/scan_again_button"
-            app:layout_constraintEnd_toEndOf="parent"
+            android:layout_margin="16dp"
+            app:layout_constraintTop_toBottomOf="@id/result_label"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/result_title">
-
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintBottom_toTopOf="@id/scan_again_button"
+            >
             <TextView
                 android:id="@+id/full_screen_text"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:gravity="center"
+                android:padding="16dp"
+                android:text="12345.67"
                 android:textColor="@android:color/white"
-                android:textSize="16sp"
-                tools:text="This is where the long recognized text would appear for the user to read and review." />
+                android:textSize="48sp"
+                android:textStyle="bold" />
         </ScrollView>
 
 
@@ -168,8 +191,10 @@
             android:id="@+id/scan_again_button"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:padding="12dp"
+            android:layout_margin="24dp"
+            android:padding="16dp"
             android:text="Scan Again"
+            android:textSize="18sp"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent" />
