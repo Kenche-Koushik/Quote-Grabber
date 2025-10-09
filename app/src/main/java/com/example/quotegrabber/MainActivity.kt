@@ -4,8 +4,12 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageFormat
 import android.graphics.Matrix
+import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.os.Bundle
@@ -18,9 +22,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.atomic.AtomicBoolean
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.Executors
 import android.util.Log
 import android.util.Size
@@ -40,7 +42,9 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import com.google.mlkit.vision.text.TextRecognition
 import java.io.ByteArrayOutputStream
+import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
@@ -272,7 +276,10 @@ class MainActivity : AppCompatActivity() {
             imageToProcess = fullBitmap
         }
 
-        val image = InputImage.fromBitmap(imageToProcess, 0)
+        // --- New: Pre-process the bitmap for better OCR ---
+        val enhancedBitmap = enhanceBitmapForOcr(imageToProcess)
+
+        val image = InputImage.fromBitmap(enhancedBitmap, 0)
         textRecognizer.process(image)
             .addOnSuccessListener { visionText ->
                 processTextBlock(visionText, fullBitmap)
@@ -283,6 +290,22 @@ class MainActivity : AppCompatActivity() {
             .addOnCompleteListener {
                 imageProxy.close()
             }
+    }
+
+    // --- New: Image pre-processing function ---
+    private fun enhanceBitmapForOcr(bitmap: Bitmap): Bitmap {
+        val enhancedBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(enhancedBitmap)
+        val paint = Paint()
+        // Increase contrast and convert to grayscale
+        val colorMatrix = ColorMatrix().apply {
+            setSaturation(0f) // Grayscale
+            // --- IMPROVEMENT: Increased contrast to make faint characters like decimal points more visible ---
+            setScale(2.0f, 2.0f, 2.0f, 1f) // Increased contrast from 1.5f
+        }
+        paint.colorFilter = ColorMatrixColorFilter(colorMatrix)
+        canvas.drawBitmap(bitmap, 0f, 0f, paint)
+        return enhancedBitmap
     }
 
     private fun processTextBlock(result: Text, fullBitmapForDisplay: Bitmap) {
@@ -326,39 +349,57 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // --- New: Context-aware text parsing logic ---
     private fun extractMeterReading(result: Text): String? {
-        var bestCandidate: String? = null
-        var bestScore = -1
+        val allElements = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }
 
-        for (block in result.textBlocks) {
-            for (line in block.lines) {
-                for (element in line.elements) {
-                    val text = element.text
-                    val cleanedText = text.replace("O", "0", ignoreCase = true)
-                        .replace("I", "1", ignoreCase = true)
-                        .replace("S", "5", ignoreCase = true)
-                        .replace("B", "8", ignoreCase = true)
-                        .replace("Z", "2", ignoreCase = true)
+        val numberCandidates = allElements.mapNotNull { element ->
+            val cleanedText = element.text.replace("O", "0", true)
+                .replace("I", "1", true)
+                .replace("S", "5", true)
+                .replace("B", "8", true)
+                .replace("Z", "2", true)
+                .replace(",", ".") // --- IMPROVEMENT: Treat commas as decimal points ---
 
-                    if (cleanedText.contains("kWh", ignoreCase = true)) {
-                        val kwhPattern = Regex("""(\d+\.?\d*)""")
-                        val match = kwhPattern.find(cleanedText)
-                        if (match != null && bestScore < 1) {
-                            bestScore = 1
-                            bestCandidate = match.groupValues[1]
-                        }
-                    }
+            val numericPattern = Regex("""\b(\d{4,7}(?:\.\d{1,2})?)\b""")
+            numericPattern.find(cleanedText)?.let { match ->
+                val reading = match.groupValues[1]
+                Pair(reading, element.boundingBox)
+            }
+        }
 
-                    val numericPattern = Regex("""\b(\d{4,7}(?:\.\d{1,2})?)\b""")
-                    val numericMatch = numericPattern.find(cleanedText)
-                    if (numericMatch != null && bestScore < 0) {
-                        bestScore = 0
-                        bestCandidate = numericMatch.groupValues[1]
-                    }
+        // Highest priority: Find a number with "kWh" to its right
+        for ((number, numberBox) in numberCandidates) {
+            val unit = findUnitOnRight(numberBox, allElements)
+            if (unit != null) {
+                return number // Found the best possible match
+            }
+        }
+
+        // Fallback: Return the largest number found, as it's most likely the reading
+        return numberCandidates.maxByOrNull { it.first.length }?.first
+    }
+
+    private fun findUnitOnRight(numberBox: Rect?, allElements: List<Text.Element>): String? {
+        if (numberBox == null) return null
+
+        val units = setOf("KWH", "KVAH", "MD")
+
+        for (element in allElements) {
+            val unitCandidate = element.text.uppercase()
+            if (units.any { unitCandidate.contains(it) }) {
+                val unitBox = element.boundingBox ?: continue
+
+                // Check if the unit is roughly on the same horizontal line and to the right
+                val isVerticallyAligned = abs(numberBox.centerY() - unitBox.centerY()) < (numberBox.height() / 2)
+                val isToTheRight = unitBox.left > numberBox.right
+
+                if (isVerticallyAligned && isToTheRight) {
+                    return unitCandidate
                 }
             }
         }
-        return bestCandidate
+        return null
     }
 
     @OptIn(ExperimentalGetImage::class)
@@ -394,3 +435,4 @@ class MainActivity : AppCompatActivity() {
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 }
+
