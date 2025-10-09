@@ -26,7 +26,6 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
 
-        <!-- Improvement 1: Framing guide to help the user position the meter -->
         <View
             android:id="@+id/framing_guide"
             android:layout_width="0dp"
@@ -63,7 +62,6 @@
             app:layout_constraintHeight_percent="0.25"
             app:layout_constraintStart_toStartOf="parent">
 
-            <!-- New: Zoom Slider -->
             <com.google.android.material.slider.Slider
                 android:id="@+id/zoom_slider"
                 android:layout_width="0dp"
@@ -74,6 +72,9 @@
                 android:value="1.0"
                 android:valueFrom="1.0"
                 android:valueTo="5.0"
+                app:thumbColor="@android:color/white"
+                app:trackColorActive="@android:color/white"
+                app:trackColorInactive="#80FFFFFF"
                 app:layout_constraintBottom_toTopOf="@+id/scan_button"
                 app:layout_constraintEnd_toEndOf="parent"
                 app:layout_constraintStart_toStartOf="parent"
@@ -99,30 +100,12 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Scan Text"
+                android:backgroundTint="@android:color/white"
+                android:textColor="@android:color/black"
                 app:layout_constraintBottom_toBottomOf="parent"
                 app:layout_constraintEnd_toEndOf="parent"
                 app:layout_constraintStart_toStartOf="parent"
                 app:layout_constraintTop_toBottomOf="@id/zoom_slider" />
-
-            <ScrollView
-                android:layout_width="0dp"
-                android:layout_height="0dp"
-                android:layout_marginStart="16dp"
-                android:layout_marginEnd="16dp"
-                android:visibility="gone"
-                app:layout_constraintBottom_toBottomOf="parent"
-                app:layout_constraintEnd_toEndOf="parent"
-                app:layout_constraintStart_toEndOf="@+id/scan_button"
-                app:layout_constraintTop_toBottomOf="@id/zoom_slider">
-
-                <TextView
-                    android:id="@+id/recognized_text"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/scan_placeholder"
-                    android:textColor="#B3FFFFFF"
-                    android:textSize="12sp" />
-            </ScrollView>
 
         </androidx.constraintlayout.widget.ConstraintLayout>
 
@@ -195,6 +178,8 @@
             android:padding="16dp"
             android:text="Scan Again"
             android:textSize="18sp"
+            android:backgroundTint="@android:color/white"
+            android:textColor="@android:color/black"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent" />

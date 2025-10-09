@@ -52,11 +52,10 @@ class MainActivity : AppCompatActivity() {
     private var isFlashlightOn = false
     private var cropRect: Rect? = null
 
-    // --- Improvement: Variables for a faster, more reliable Smart Scan ---
     private var potentialReading: String? = null
     private var stableFrames = 0
-    private val REQUIRED_STABLE_FRAMES = 2 // Reduced from 3 for faster lock-on
-    private val SCAN_TIMEOUT_MS = 5000L // 5 seconds
+    private val REQUIRED_STABLE_FRAMES = 2
+    private val SCAN_TIMEOUT_MS = 5000L
     private var scanStartTime = 0L
 
 
@@ -98,15 +97,14 @@ class MainActivity : AppCompatActivity() {
                 isFlashlightOn = false
                 binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
             }
-            // Reset state for the new scan
+
             potentialReading = null
             stableFrames = 0
             isScanning.set(true)
-            scanStartTime = System.currentTimeMillis() // Start the timeout timer
-            binding.recognizedText.text = "Scanning... Hold steady."
+            scanStartTime = System.currentTimeMillis()
+            Toast.makeText(this, "Scanning... Hold steady.", Toast.LENGTH_SHORT).show()
 
-            // --- New: Disable the button while scanning ---
-            binding.scanButton.isEnabled = false
+            setUiEnabled(false) // Disable controls
         }
 
         binding.flashlightButton.setOnClickListener {
@@ -114,18 +112,29 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.scanAgainButton.setOnClickListener {
-            // Reset state for the new scan
             potentialReading = null
             stableFrames = 0
             isScanning.set(false)
             binding.resultsContainer.visibility = View.GONE
             binding.cameraUiContainer.visibility = View.VISIBLE
-            binding.recognizedText.text = getString(R.string.scan_placeholder)
 
-            // --- New: Re-enable the scan button ---
-            binding.scanButton.isEnabled = true
+            setUiEnabled(true) // Re-enable controls
         }
     }
+
+    private fun setUiEnabled(isEnabled: Boolean) {
+        val alphaValue = if (isEnabled) 1.0f else 0.5f
+        binding.scanButton.isEnabled = isEnabled
+        binding.scanButton.alpha = alphaValue
+
+        binding.zoomSlider.isEnabled = isEnabled
+        binding.zoomSlider.alpha = alphaValue
+
+        // Only re-enable flashlight if the device has one
+        binding.flashlightButton.isEnabled = if (isEnabled) camera?.cameraInfo?.hasFlashUnit() ?: false else false
+        binding.flashlightButton.alpha = alphaValue
+    }
+
 
     private fun requestPermissions() {
         activityResultLauncher.launch(REQUIRED_PERMISSIONS)
@@ -277,16 +286,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun processTextBlock(result: Text, fullBitmapForDisplay: Bitmap) {
-        if (!isScanning.get()) return // If user has cancelled, do nothing.
+        if (!isScanning.get()) return
 
         val currentReading = extractMeterReading(result)
 
         runOnUiThread {
-            // Check for timeout
             if (System.currentTimeMillis() - scanStartTime > SCAN_TIMEOUT_MS) {
                 isScanning.set(false)
-                binding.scanButton.isEnabled = true // Re-enable on timeout
-                // If we found at least one potential reading, use it as a fallback.
+                setUiEnabled(true) // Re-enable on timeout
                 if (potentialReading != null) {
                     binding.scannedImageView.setImageBitmap(fullBitmapForDisplay)
                     binding.fullScreenText.text = potentialReading
@@ -294,14 +301,12 @@ class MainActivity : AppCompatActivity() {
                     binding.cameraUiContainer.visibility = View.GONE
                 } else {
                     Toast.makeText(this, "Could not find a stable reading. Please try again.", Toast.LENGTH_SHORT).show()
-                    binding.recognizedText.text = getString(R.string.scan_placeholder)
                 }
                 return@runOnUiThread
             }
 
 
             if (currentReading != null) {
-                binding.recognizedText.text = "Found: $currentReading"
                 if (currentReading == potentialReading) {
                     stableFrames++
                 } else {
@@ -310,8 +315,8 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (stableFrames >= REQUIRED_STABLE_FRAMES) {
-                    isScanning.set(false) // Stop scanning
-                    binding.scanButton.isEnabled = true // Re-enable on success
+                    isScanning.set(false)
+                    setUiEnabled(true) // Re-enable on success
                     binding.scannedImageView.setImageBitmap(fullBitmapForDisplay)
                     binding.fullScreenText.text = potentialReading
                     binding.resultsContainer.visibility = View.VISIBLE
