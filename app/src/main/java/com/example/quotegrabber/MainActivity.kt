@@ -7,8 +7,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Paint
@@ -63,19 +61,20 @@ class MainActivity : AppCompatActivity() {
     private var cropRect: Rect? = null
 
     private val readingVotes = mutableMapOf<String, Int>()
-    private val REQUIRED_VOTES_TO_WIN = 3
-    private val SCAN_TIMEOUT_MS = 5000L
+    // --- OPTIMIZATION 2: Faster lock-on ---
+    private val REQUIRED_VOTES_TO_WIN = 2 // Was 3
+    private val SCAN_TIMEOUT_MS = 3000L
     private var scanStartTime = 0L
     private var lastValidBitmap: Bitmap? = null
 
-    // --- New: Motion Detection ---
     private lateinit var sensorManager: SensorManager
     private var accelerometer: Sensor? = null
     private val isDeviceSteady = AtomicBoolean(false)
     private val lastAcceleration = FloatArray(3)
     private var lastShakeTime: Long = 0
-    private val SHAKE_THRESHOLD = 0.8f // m/s^2 (Adjust this sensitivity as needed)
-    private val STEADY_DELAY_MS = 500 // 0.5 sec of steadiness required
+    // --- OPTIMIZATION 2: Tuned motion filter ---
+    private val SHAKE_THRESHOLD = 1.0f // Was 0.8f, less strict
+    private val STEADY_DELAY_MS = 300 // Was 500, faster to acquire steady state
 
     private val activityResultLauncher =
         registerForActivityResult(
@@ -109,19 +108,13 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         requestPermissions()
 
-        // --- New: Initialize Motion Sensor ---
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         sensorManager.registerListener(sensorListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
 
         binding.scanButton.setOnClickListener {
-            if (isFlashlightOn) {
-                camera?.cameraControl?.enableTorch(false)
-                isFlashlightOn = false
-                binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
-            }
-
             readingVotes.clear()
+            lastValidBitmap?.recycle() // --- OPTIMIZATION 1: Clear old bitmap ---
             lastValidBitmap = null
             isScanning.set(true)
             scanStartTime = System.currentTimeMillis()
@@ -136,6 +129,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.scanAgainButton.setOnClickListener {
             readingVotes.clear()
+            lastValidBitmap?.recycle() // --- OPTIMIZATION 1: Clear old bitmap ---
             lastValidBitmap = null
             isScanning.set(false)
             binding.resultsContainer.visibility = View.GONE
@@ -145,7 +139,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // --- New: Sensor Listener Logic ---
     private val sensorListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
@@ -153,7 +146,6 @@ class MainActivity : AppCompatActivity() {
                 val y = event.values[1]
                 val z = event.values[2]
 
-                // Simple shake detection
                 val dx = x - lastAcceleration[0]
                 val dy = y - lastAcceleration[1]
                 val dz = z - lastAcceleration[2]
@@ -169,7 +161,6 @@ class MainActivity : AppCompatActivity() {
                     lastShakeTime = now
                     isDeviceSteady.set(false)
                 } else {
-                    // If it's been steady for a bit, set the flag
                     if (now - lastShakeTime > STEADY_DELAY_MS) {
                         isDeviceSteady.set(true)
                     }
@@ -177,7 +168,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-            // Not needed for this use case
+            // Not needed
         }
     }
 
@@ -301,8 +292,6 @@ class MainActivity : AppCompatActivity() {
 
     @OptIn(ExperimentalGetImage::class)
     private fun analyzeImage(imageProxy: ImageProxy) {
-        // --- IMPROVEMENT 1: Motion-Based Scanning ---
-        // If the device is not steady, skip the frame entirely.
         if (!isDeviceSteady.get()) {
             imageProxy.close()
             return
@@ -314,9 +303,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         val fullBitmap = imageProxyToBitmap(imageProxy)
+        // --- OPTIMIZATION 1: Recycle the *previous* bitmap ---
+        lastValidBitmap?.recycle()
         lastValidBitmap = fullBitmap
 
         val imageToProcess: Bitmap
+        val isCropped: Boolean
         if (cropRect != null) {
             val previewWidth = binding.cameraPreview.width.toFloat()
             val previewHeight = binding.cameraPreview.height.toFloat()
@@ -331,14 +323,16 @@ class MainActivity : AppCompatActivity() {
 
             if (cropLeft + cropWidth <= fullBitmap.width && cropTop + cropHeight <= fullBitmap.height) {
                 imageToProcess = Bitmap.createBitmap(fullBitmap, cropLeft, cropTop, cropWidth, cropHeight)
+                isCropped = true // This is a new bitmap
             } else {
                 imageToProcess = fullBitmap
+                isCropped = false // This is just a reference
             }
         } else {
             imageToProcess = fullBitmap
+            isCropped = false
         }
 
-        // --- IMPROVEMENT 2: Use new filter ---
         val enhancedBitmap = enhanceBitmapForOcr(imageToProcess)
         val image = InputImage.fromBitmap(enhancedBitmap, 0)
 
@@ -351,10 +345,14 @@ class MainActivity : AppCompatActivity() {
             }
             .addOnCompleteListener {
                 imageProxy.close()
+                // --- OPTIMIZATION 1: Recycle intermediate bitmaps ---
+                enhancedBitmap.recycle()
+                if (isCropped) {
+                    imageToProcess.recycle() // Recycle the cropped bitmap
+                }
             }
     }
 
-    // --- IMPROVEMENT 2: Advanced Binary Thresholding Filter ---
     private fun enhanceBitmapForOcr(bitmap: Bitmap): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
@@ -368,11 +366,8 @@ class MainActivity : AppCompatActivity() {
             val g = Color.green(pixel)
             val b = Color.blue(pixel)
 
-            // Convert to grayscale
             val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
 
-            // Apply a global threshold. 127 is a standard midpoint.
-            // This creates a pure black-and-white image.
             val newColor = if (gray > 127) Color.WHITE else Color.BLACK
             pixels[i] = newColor
         }
@@ -388,6 +383,12 @@ class MainActivity : AppCompatActivity() {
         binding.fullScreenText.text = reading
         binding.resultsContainer.visibility = View.VISIBLE
         binding.cameraUiContainer.visibility = View.GONE
+
+        if (isFlashlightOn) {
+            camera?.cameraControl?.enableTorch(false)
+            isFlashlightOn = false
+            binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
+        }
     }
 
     private fun processTextBlock(result: Text) {
@@ -409,6 +410,11 @@ class MainActivity : AppCompatActivity() {
                     showResults(winner)
                 } else {
                     Toast.makeText(this, "Could not find a stable reading. Please try again.", Toast.LENGTH_SHORT).show()
+                    if (isFlashlightOn) {
+                        camera?.cameraControl?.enableTorch(false)
+                        isFlashlightOn = false
+                        binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
+                    }
                 }
                 return@runOnUiThread
             }
@@ -485,11 +491,22 @@ class MainActivity : AppCompatActivity() {
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
+    override fun onPause() {
+        super.onPause()
+        sensorManager.unregisterListener(sensorListener)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        sensorManager.registerListener(sensorListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         sensorManager.unregisterListener(sensorListener)
         cameraExecutor.shutdown()
         textRecognizer.close()
+        lastValidBitmap?.recycle()
     }
 
     companion object {
@@ -497,4 +514,3 @@ class MainActivity : AppCompatActivity() {
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 }
-
