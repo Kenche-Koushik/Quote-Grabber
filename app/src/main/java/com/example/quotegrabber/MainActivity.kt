@@ -2,9 +2,11 @@ package com.example.quotegrabber
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.ImageFormat
@@ -12,6 +14,10 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.YuvImage
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -44,7 +50,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.text.TextRecognition
 import java.io.ByteArrayOutputStream
-import kotlin.math.abs
+import kotlin.math.sqrt
 
 class MainActivity : AppCompatActivity() {
 
@@ -56,12 +62,20 @@ class MainActivity : AppCompatActivity() {
     private var isFlashlightOn = false
     private var cropRect: Rect? = null
 
-    private var potentialReading: String? = null
-    private var stableFrames = 0
-    private val REQUIRED_STABLE_FRAMES = 2
+    private val readingVotes = mutableMapOf<String, Int>()
+    private val REQUIRED_VOTES_TO_WIN = 3
     private val SCAN_TIMEOUT_MS = 5000L
     private var scanStartTime = 0L
+    private var lastValidBitmap: Bitmap? = null
 
+    // --- New: Motion Detection ---
+    private lateinit var sensorManager: SensorManager
+    private var accelerometer: Sensor? = null
+    private val isDeviceSteady = AtomicBoolean(false)
+    private val lastAcceleration = FloatArray(3)
+    private var lastShakeTime: Long = 0
+    private val SHAKE_THRESHOLD = 0.8f // m/s^2 (Adjust this sensitivity as needed)
+    private val STEADY_DELAY_MS = 500 // 0.5 sec of steadiness required
 
     private val activityResultLauncher =
         registerForActivityResult(
@@ -95,6 +109,11 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         requestPermissions()
 
+        // --- New: Initialize Motion Sensor ---
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        sensorManager.registerListener(sensorListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
+
         binding.scanButton.setOnClickListener {
             if (isFlashlightOn) {
                 camera?.cameraControl?.enableTorch(false)
@@ -102,13 +121,13 @@ class MainActivity : AppCompatActivity() {
                 binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
             }
 
-            potentialReading = null
-            stableFrames = 0
+            readingVotes.clear()
+            lastValidBitmap = null
             isScanning.set(true)
             scanStartTime = System.currentTimeMillis()
             Toast.makeText(this, "Scanning... Hold steady.", Toast.LENGTH_SHORT).show()
 
-            setUiEnabled(false) // Disable controls
+            setUiEnabled(false)
         }
 
         binding.flashlightButton.setOnClickListener {
@@ -116,13 +135,49 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.scanAgainButton.setOnClickListener {
-            potentialReading = null
-            stableFrames = 0
+            readingVotes.clear()
+            lastValidBitmap = null
             isScanning.set(false)
             binding.resultsContainer.visibility = View.GONE
             binding.cameraUiContainer.visibility = View.VISIBLE
 
-            setUiEnabled(true) // Re-enable controls
+            setUiEnabled(true)
+        }
+    }
+
+    // --- New: Sensor Listener Logic ---
+    private val sensorListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
+                val x = event.values[0]
+                val y = event.values[1]
+                val z = event.values[2]
+
+                // Simple shake detection
+                val dx = x - lastAcceleration[0]
+                val dy = y - lastAcceleration[1]
+                val dz = z - lastAcceleration[2]
+
+                lastAcceleration[0] = x
+                lastAcceleration[1] = y
+                lastAcceleration[2] = z
+
+                val acceleration = sqrt(dx * dx + dy * dy + dz * dz)
+                val now = System.currentTimeMillis()
+
+                if (acceleration > SHAKE_THRESHOLD) {
+                    lastShakeTime = now
+                    isDeviceSteady.set(false)
+                } else {
+                    // If it's been steady for a bit, set the flag
+                    if (now - lastShakeTime > STEADY_DELAY_MS) {
+                        isDeviceSteady.set(true)
+                    }
+                }
+            }
+        }
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+            // Not needed for this use case
         }
     }
 
@@ -134,7 +189,6 @@ class MainActivity : AppCompatActivity() {
         binding.zoomSlider.isEnabled = isEnabled
         binding.zoomSlider.alpha = alphaValue
 
-        // Only re-enable flashlight if the device has one
         binding.flashlightButton.isEnabled = if (isEnabled) camera?.cameraInfo?.hasFlashUnit() ?: false else false
         binding.flashlightButton.alpha = alphaValue
     }
@@ -247,14 +301,22 @@ class MainActivity : AppCompatActivity() {
 
     @OptIn(ExperimentalGetImage::class)
     private fun analyzeImage(imageProxy: ImageProxy) {
+        // --- IMPROVEMENT 1: Motion-Based Scanning ---
+        // If the device is not steady, skip the frame entirely.
+        if (!isDeviceSteady.get()) {
+            imageProxy.close()
+            return
+        }
+
         if (!isScanning.get()) {
             imageProxy.close()
             return
         }
 
         val fullBitmap = imageProxyToBitmap(imageProxy)
-        val imageToProcess: Bitmap
+        lastValidBitmap = fullBitmap
 
+        val imageToProcess: Bitmap
         if (cropRect != null) {
             val previewWidth = binding.cameraPreview.width.toFloat()
             val previewHeight = binding.cameraPreview.height.toFloat()
@@ -276,13 +338,13 @@ class MainActivity : AppCompatActivity() {
             imageToProcess = fullBitmap
         }
 
-        // --- New: Pre-process the bitmap for better OCR ---
+        // --- IMPROVEMENT 2: Use new filter ---
         val enhancedBitmap = enhanceBitmapForOcr(imageToProcess)
-
         val image = InputImage.fromBitmap(enhancedBitmap, 0)
+
         textRecognizer.process(image)
             .addOnSuccessListener { visionText ->
-                processTextBlock(visionText, fullBitmap)
+                processTextBlock(visionText)
             }
             .addOnFailureListener { e ->
                 Log.e(TAG, "Text recognition failed", e)
@@ -292,115 +354,114 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    // --- New: Image pre-processing function ---
+    // --- IMPROVEMENT 2: Advanced Binary Thresholding Filter ---
     private fun enhanceBitmapForOcr(bitmap: Bitmap): Bitmap {
-        val enhancedBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(enhancedBitmap)
-        val paint = Paint()
-        // Increase contrast and convert to grayscale
-        val colorMatrix = ColorMatrix().apply {
-            setSaturation(0f) // Grayscale
-            // --- IMPROVEMENT: Increased contrast to make faint characters like decimal points more visible ---
-            setScale(2.0f, 2.0f, 2.0f, 1f) // Increased contrast from 1.5f
+        val width = bitmap.width
+        val height = bitmap.height
+        val enhancedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            val r = Color.red(pixel)
+            val g = Color.green(pixel)
+            val b = Color.blue(pixel)
+
+            // Convert to grayscale
+            val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+
+            // Apply a global threshold. 127 is a standard midpoint.
+            // This creates a pure black-and-white image.
+            val newColor = if (gray > 127) Color.WHITE else Color.BLACK
+            pixels[i] = newColor
         }
-        paint.colorFilter = ColorMatrixColorFilter(colorMatrix)
-        canvas.drawBitmap(bitmap, 0f, 0f, paint)
+
+        enhancedBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
         return enhancedBitmap
     }
 
-    private fun processTextBlock(result: Text, fullBitmapForDisplay: Bitmap) {
+    private fun showResults(reading: String) {
+        if (lastValidBitmap != null) {
+            binding.scannedImageView.setImageBitmap(lastValidBitmap)
+        }
+        binding.fullScreenText.text = reading
+        binding.resultsContainer.visibility = View.VISIBLE
+        binding.cameraUiContainer.visibility = View.GONE
+    }
+
+    private fun processTextBlock(result: Text) {
         if (!isScanning.get()) return
+
+        if (result.text.length < 2) {
+            return
+        }
 
         val currentReading = extractMeterReading(result)
 
         runOnUiThread {
             if (System.currentTimeMillis() - scanStartTime > SCAN_TIMEOUT_MS) {
                 isScanning.set(false)
-                setUiEnabled(true) // Re-enable on timeout
-                if (potentialReading != null) {
-                    binding.scannedImageView.setImageBitmap(fullBitmapForDisplay)
-                    binding.fullScreenText.text = potentialReading
-                    binding.resultsContainer.visibility = View.VISIBLE
-                    binding.cameraUiContainer.visibility = View.GONE
+                setUiEnabled(true)
+
+                val winner = readingVotes.maxByOrNull { it.value }?.key
+                if (winner != null) {
+                    showResults(winner)
                 } else {
                     Toast.makeText(this, "Could not find a stable reading. Please try again.", Toast.LENGTH_SHORT).show()
                 }
                 return@runOnUiThread
             }
 
-
             if (currentReading != null) {
-                if (currentReading == potentialReading) {
-                    stableFrames++
-                } else {
-                    potentialReading = currentReading
-                    stableFrames = 1
-                }
+                val currentVotes = readingVotes.getOrDefault(currentReading, 0) + 1
+                readingVotes[currentReading] = currentVotes
 
-                if (stableFrames >= REQUIRED_STABLE_FRAMES) {
+                if (currentVotes >= REQUIRED_VOTES_TO_WIN) {
                     isScanning.set(false)
-                    setUiEnabled(true) // Re-enable on success
-                    binding.scannedImageView.setImageBitmap(fullBitmapForDisplay)
-                    binding.fullScreenText.text = potentialReading
-                    binding.resultsContainer.visibility = View.VISIBLE
-                    binding.cameraUiContainer.visibility = View.GONE
+                    setUiEnabled(true)
+                    showResults(currentReading)
                 }
             }
         }
     }
 
-    // --- New: Context-aware text parsing logic ---
-    private fun extractMeterReading(result: Text): String? {
-        val allElements = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }
-
-        val numberCandidates = allElements.mapNotNull { element ->
-            val cleanedText = element.text.replace("O", "0", true)
-                .replace("I", "1", true)
-                .replace("S", "5", true)
-                .replace("B", "8", true)
-                .replace("Z", "2", true)
-                .replace(",", ".") // --- IMPROVEMENT: Treat commas as decimal points ---
-
-            val numericPattern = Regex("""\b(\d{4,7}(?:\.\d{1,2})?)\b""")
-            numericPattern.find(cleanedText)?.let { match ->
-                val reading = match.groupValues[1]
-                Pair(reading, element.boundingBox)
-            }
-        }
-
-        // Highest priority: Find a number with "kWh" to its right
-        for ((number, numberBox) in numberCandidates) {
-            val unit = findUnitOnRight(numberBox, allElements)
-            if (unit != null) {
-                return number // Found the best possible match
-            }
-        }
-
-        // Fallback: Return the largest number found, as it's most likely the reading
-        return numberCandidates.maxByOrNull { it.first.length }?.first
+    private fun cleanText(text: String): String {
+        return text.replace("O", "0", true)
+            .replace("I", "1", true)
+            .replace("S", "5", true)
+            .replace("B", "8", true)
+            .replace("Z", "2", true)
+            .replace(",", ".")
+            .replace(" ", "")
     }
 
-    private fun findUnitOnRight(numberBox: Rect?, allElements: List<Text.Element>): String? {
-        if (numberBox == null) return null
+    private fun extractMeterReading(result: Text): String? {
+        val allLines = result.textBlocks.flatMap { it.lines }
+        if (allLines.isEmpty()) return null
 
         val units = setOf("KWH", "KVAH", "MD")
+        val allFoundReadings = mutableListOf<String>()
 
-        for (element in allElements) {
-            val unitCandidate = element.text.uppercase()
-            if (units.any { unitCandidate.contains(it) }) {
-                val unitBox = element.boundingBox ?: continue
+        val numericPattern = Regex("""\b(\d{4,7}(?:\.\d{1,2})?)\b""")
 
-                // Check if the unit is roughly on the same horizontal line and to the right
-                val isVerticallyAligned = abs(numberBox.centerY() - unitBox.centerY()) < (numberBox.height() / 2)
-                val isToTheRight = unitBox.left > numberBox.right
+        for (line in allLines) {
+            val cleanedLineText = cleanText(line.text)
+            val hasUnit = units.any { cleanedLineText.uppercase().contains(it) }
 
-                if (isVerticallyAligned && isToTheRight) {
-                    return unitCandidate
+            val matches = numericPattern.findAll(cleanedLineText)
+            for (match in matches) {
+                val number = match.groupValues[1]
+
+                if (hasUnit) {
+                    return number
                 }
+                allFoundReadings.add(number)
             }
         }
-        return null
+        return allFoundReadings.maxByOrNull { it.length }
     }
+
 
     @OptIn(ExperimentalGetImage::class)
     private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
@@ -426,6 +487,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        sensorManager.unregisterListener(sensorListener)
         cameraExecutor.shutdown()
         textRecognizer.close()
     }
