@@ -2,6 +2,7 @@ package com.example.quotegrabber
 
 import android.Manifest
 import android.annotation.SuppressLint
+// Removed unused Context import
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -20,6 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions // Correct import
 import java.util.concurrent.Executors
 import android.util.Log
 import android.util.Size
@@ -39,7 +41,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
-import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognition // Keep this import
 import java.io.ByteArrayOutputStream
 import kotlin.math.abs
 import kotlin.math.max
@@ -95,7 +97,7 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        textRecognizer = TextRecognition.getClient(com.google.mlkit.vision.text.latin.TextRecognizerOptions.DEFAULT_OPTIONS)
+        textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) // Use specific latin options
         cameraExecutor = Executors.newSingleThreadExecutor()
         requestPermissions()
 
@@ -268,24 +270,33 @@ class MainActivity : AppCompatActivity() {
             val previewHeight = binding.cameraPreview.height.toFloat()
             val bitmapWidth = fullBitmap.width.toFloat()
             val bitmapHeight = fullBitmap.height.toFloat()
+
+            // --- Widen the Crop ---
             val scaleX = bitmapWidth / previewWidth
             val scaleY = bitmapHeight / previewHeight
-            val cropLeft = (cropRect!!.left * scaleX).toInt()
-            val cropTop = (cropRect!!.top * scaleY).toInt()
-            val cropWidth = (cropRect!!.width() * scaleX).toInt()
-            val cropHeight = (cropRect!!.height() * scaleY).toInt()
+            val paddingX = (cropRect!!.width() * scaleX * 0.05f).toInt()
+            val paddingY = (cropRect!!.height() * scaleY * 0.1f).toInt()
 
-            if (cropLeft + cropWidth <= fullBitmap.width && cropTop + cropHeight <= fullBitmap.height && cropWidth > 0 && cropHeight > 0) {
+            val cropLeft = max(0, (cropRect!!.left * scaleX).toInt() - paddingX)
+            val cropTop = max(0, (cropRect!!.top * scaleY).toInt() - paddingY)
+            val cropRight = min(fullBitmap.width, (cropRect!!.right * scaleX).toInt() + paddingX)
+            val cropBottom = min(fullBitmap.height, (cropRect!!.bottom * scaleY).toInt() + paddingY)
+
+            val cropWidth = cropRight - cropLeft
+            val cropHeight = cropBottom - cropTop
+
+
+            if (cropWidth > 0 && cropHeight > 0) {
                 try {
                     imageToProcess = Bitmap.createBitmap(fullBitmap, cropLeft, cropTop, cropWidth, cropHeight)
                     isCropped = true
                 } catch (e: IllegalArgumentException) {
                     Log.e(TAG, "Bitmap cropping error: ${e.message}")
-                    imageToProcess = fullBitmap // Fallback to full image on error
+                    imageToProcess = fullBitmap
                     isCropped = false
                 }
             } else {
-                Log.w(TAG, "Calculated crop rect is out of bounds or invalid, using full bitmap")
+                Log.w(TAG, "Calculated crop rect is invalid after padding, using full bitmap")
                 imageToProcess = fullBitmap
                 isCropped = false
             }
@@ -307,21 +318,21 @@ class MainActivity : AppCompatActivity() {
             .addOnCompleteListener {
                 imageProxy.close()
                 enhancedBitmap.recycle()
-                if (isCropped && imageToProcess != fullBitmap) { // Only recycle if it's a separate bitmap
+                if (isCropped && imageToProcess != fullBitmap) {
                     imageToProcess.recycle()
                 }
             }
     }
 
-    // --- Sharpening filter re-added + Adaptive Thresholding ---
+    // --- Adaptive Thresholding Only (Sharpening Removed) ---
     private fun enhanceBitmapForOcr(bitmap: Bitmap): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
-        if (width <= 0 || height <= 0) return bitmap // Return original if invalid dimensions
+        if (width <= 0 || height <= 0) return bitmap
 
-        val sharpenedBitmap = applySharpeningFilter(bitmap) // Sharpening step re-added
+        // REMOVED: Sharpening step
         val pixels = IntArray(width * height)
-        sharpenedBitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height) // Get pixels from original bitmap
 
         var totalLuminance: Long = 0
         val grayPixels = IntArray(pixels.size)
@@ -336,8 +347,8 @@ class MainActivity : AppCompatActivity() {
             totalLuminance += gray
         }
 
-        val avgLuminance = if (pixels.isNotEmpty()) (totalLuminance / pixels.size).toInt() else 128 // Use mid-gray if empty
-        val threshold = (avgLuminance * 0.9).toInt()
+        val avgLuminance = if (pixels.isNotEmpty()) (totalLuminance / pixels.size).toInt() else 128
+        val threshold = (avgLuminance * 0.95).toInt() // Tuned threshold
 
         for (i in pixels.indices) {
             pixels[i] = if (grayPixels[i] > threshold) Color.WHITE else Color.BLACK
@@ -346,83 +357,19 @@ class MainActivity : AppCompatActivity() {
         val enhancedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         enhancedBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
 
-        // Recycle the intermediate sharpened bitmap only if it's different from original
-        if (sharpenedBitmap != bitmap) {
-            sharpenedBitmap.recycle()
-        }
-
+        // REMOVED: Recycling of intermediate sharpened bitmap
 
         return enhancedBitmap
     }
 
-    // --- Sharpening Filter Kernel re-added ---
-    private fun applySharpeningFilter(bitmap: Bitmap): Bitmap {
-        val width = bitmap.width
-        val height = bitmap.height
-        if (width < 3 || height < 3) return bitmap // Kernel needs neighbors
-
-        val resultBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-
-        // Sharpening kernel
-        val kernel = arrayOf(
-            floatArrayOf(0f, -1f, 0f),
-            floatArrayOf(-1f, 5f, -1f),
-            floatArrayOf(0f, -1f, 0f)
-        )
-
-        // Apply kernel skipping edges
-        for (y in 1 until height - 1) {
-            for (x in 1 until width - 1) {
-                var sumR = 0f
-                var sumG = 0f
-                var sumB = 0f
-
-                for (ky in -1..1) {
-                    for (kx in -1..1) {
-                        val pixelIndex = (y + ky) * width + (x + kx)
-                        if (pixelIndex >= 0 && pixelIndex < pixels.size) { // Boundary check
-                            val pixel = pixels[pixelIndex]
-                            val kernelVal = kernel[ky + 1][kx + 1]
-                            sumR += Color.red(pixel) * kernelVal
-                            sumG += Color.green(pixel) * kernelVal
-                            sumB += Color.blue(pixel) * kernelVal
-                        }
-                    }
-                }
-
-                val r = min(255, max(0, sumR.toInt()))
-                val g = min(255, max(0, sumG.toInt()))
-                val b = min(255, max(0, sumB.toInt()))
-                if(x >= 0 && x < width && y >=0 && y < height) { // Double check bounds before setting pixel
-                    resultBitmap.setPixel(x, y, Color.rgb(r, g, b))
-                }
-            }
-        }
-        // Handle edges (copy original pixel values) - simple approach
-        for (y in 0 until height) {
-            if (width > 0) {
-                resultBitmap.setPixel(0, y, pixels[y * width]) // Left edge
-                resultBitmap.setPixel(width - 1, y, pixels[y * width + width - 1]) // Right edge
-            }
-        }
-        for (x in 0 until width) {
-            if (height > 0) {
-                resultBitmap.setPixel(x, 0, pixels[x]) // Top edge
-                resultBitmap.setPixel(x, height-1, pixels[(height-1)*width + x]) // Bottom edge
-            }
-        }
-
-        return resultBitmap
-    }
+    // --- REMOVED: applySharpeningFilter function ---
 
 
     private fun showResults(reading: String) {
-        if (lastValidBitmap != null && !lastValidBitmap!!.isRecycled) { // Check if bitmap is valid
+        if (lastValidBitmap != null && !lastValidBitmap!!.isRecycled) {
             binding.scannedImageView.setImageBitmap(lastValidBitmap)
         } else {
-            binding.scannedImageView.setImageDrawable(null) // Clear if bitmap is invalid
+            binding.scannedImageView.setImageDrawable(null)
             Log.e(TAG, "lastValidBitmap was null or recycled in showResults")
         }
         binding.fullScreenText.text = reading
@@ -473,18 +420,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // --- Updated cleanText to remove decimals ---
+    // --- Updated cleanText with more replacements ---
     private fun cleanText(text: String): String {
-        return text.replace("O", "0", true)
-            .replace("I", "1", true)
-            .replace("S", "5", true)
-            .replace("B", "8", true)
-            .replace("Z", "2", true)
-            .replace(",", ".") // Keep replacing comma first
+        return text.uppercase() // Convert to uppercase for consistent replacement
+            .replace("O", "0")
+            .replace("I", "1")
+            .replace("L", "1") // L -> 1
+            .replace("Z", "2") // Z -> 2
+            .replace("S", "5") // S -> 5
+            .replace("B", "8") // B -> 8
+            .replace("G", "6") // G -> 6 (less common, but possible)
+            .replace("Q", "0") // Q -> 0 (less common)
+            .replace(",", ".")
             .replace(" ", "")
-            // Remove decimal point and the digit immediately after it
-            .replace(Regex("\\.\\d"), "")
-            // Remove any remaining non-digit characters
+            .replace(Regex("\\.\\d"), "") // Remove decimal and digit after it
             .filter { it.isDigit() }
     }
 
@@ -494,7 +443,8 @@ class MainActivity : AppCompatActivity() {
         if (allElements.isEmpty()) return null
 
         val units = setOf("KWH", "KVAH", "MD")
-        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""") // Whole numbers, 4-7 digits
+        // --- IMPROVEMENT 2: Relaxed Regex (Min 3 digits) ---
+        val validReadingPattern = Regex("""\b(0*\d{3,7})\b""") // Whole numbers, 3-7 digits
 
         val candidates = mutableListOf<ReadingCandidate>()
 
@@ -507,24 +457,26 @@ class MainActivity : AppCompatActivity() {
                 val number = match.value
                 val box = element.boundingBox
                 val height = box?.height() ?: 0
-                candidates.add(ReadingCandidate(number, box, height))
+                if (height > 5) {
+                    candidates.add(ReadingCandidate(number, box, height))
+                }
             }
         }
         if (candidates.isEmpty()) return null
 
-        // 2. Group candidates by height (allow 15% tolerance)
+        // 2. Group candidates by height (allow 25% tolerance - increased)
         val heightGroups = candidates.groupBy { candidate ->
-            // Find the closest "bucket" based on height
             candidates.minByOrNull { abs(it.height - candidate.height) }?.height ?: candidate.height
-        }.filterValues { group -> // Filter groups by tolerance
+        }.filterValues { group ->
+            if (group.isEmpty()) return@filterValues false // Avoid division by zero
             val avgHeight = group.map { it.height }.average()
-            group.all { abs(it.height - avgHeight) <= avgHeight * 0.15 }
+            group.all { abs(it.height - avgHeight) <= avgHeight * 0.25 } // Tolerance increased to 25%
         }
 
 
-        // 3. Find the group with the most candidates (most consistent height)
+        // 3. Find the group with the most candidates
         val mostConsistentGroup = heightGroups.maxByOrNull { it.value.size }?.value
-            ?: candidates // Fallback to all candidates if grouping fails
+            ?: candidates
 
 
         // 4. Find potential units
@@ -544,12 +496,11 @@ class MainActivity : AppCompatActivity() {
         // --- Categorize Readings *within the most consistent group* ---
         for (candidate in mostConsistentGroup) {
             var foundPair = false
-            // Check for Spatial Pair
             for ((unit, unitBox) in unitCandidates) {
                 if (isUnitSpatiallyClose(candidate.box, unitBox)) {
                     pairedReadings.add(candidate.number)
                     foundPair = true
-                    break // A number can only be paired once
+                    break
                 }
             }
             if (!foundPair) {
@@ -569,12 +520,12 @@ class MainActivity : AppCompatActivity() {
             return otherValidReadings.maxByOrNull { it.length }
         }
 
-        // Fallback: If height grouping failed, try longest from original candidates
+        // Fallback: If height grouping failed, try longest valid from original candidates
         if (mostConsistentGroup === candidates && candidates.isNotEmpty()){
             Log.w(TAG,"Height consistency check failed, falling back to longest overall candidate.")
-            return candidates.maxByOrNull { it.number.length }?.number
+            val validOriginalCandidates = candidates.filter { it.number.matches(validReadingPattern) }
+            return validOriginalCandidates.maxByOrNull { it.number.length }?.number
         }
-
 
         return null // No valid reading found
     }
@@ -587,28 +538,22 @@ class MainActivity : AppCompatActivity() {
     private fun isUnitSpatiallyClose(numberBox: Rect?, unitBox: Rect?): Boolean {
         if (numberBox == null || unitBox == null) return false
 
-        // --- IMPROVEMENT: More Tolerant Spatial Checks ---
-        // Use a larger multiplier for tolerance based on width AND height
         val toleranceX = numberBox.width() * 5
-        val toleranceY = numberBox.height() * 2 // Allow more vertical difference
+        val toleranceY = numberBox.height() * 2
 
-        // 1. Check if unit is on the Right
-        // Allow centers to be within one full number height vertically
+        // 1. Check Right
         val isVerticallyAlignedRight = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
         val isToTheRight = unitBox.left > numberBox.right
         val isCloseHorizontallyRight = (unitBox.left - numberBox.right) < toleranceX
         if (isVerticallyAlignedRight && isToTheRight && isCloseHorizontallyRight) return true
 
-        // 2. Check if unit is on the Left
-        // Allow centers to be within one full number height vertically
+        // 2. Check Left
         val isVerticallyAlignedLeft = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
         val isToTheLeft = numberBox.left > unitBox.right // Corrected condition
         val isCloseHorizontallyLeft = (numberBox.left - unitBox.right) < toleranceX
         if (isVerticallyAlignedLeft && isToTheLeft && isCloseHorizontallyLeft) return true
 
-
-        // 3. Check if unit is on Top
-        // Allow centers to be within one full number width horizontally
+        // 3. Check Top
         val isHorizontallyAlignedTop = abs(numberBox.centerX() - unitBox.centerX()) < numberBox.width()
         val isAbove = numberBox.top > unitBox.bottom
         val isCloseVertically = (numberBox.top - unitBox.bottom) < toleranceY
