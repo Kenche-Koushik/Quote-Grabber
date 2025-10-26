@@ -5,17 +5,11 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ImageFormat
 import android.graphics.Matrix
-import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.YuvImage
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -48,7 +42,9 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.text.TextRecognition
 import java.io.ByteArrayOutputStream
-import kotlin.math.sqrt
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
 
@@ -61,20 +57,12 @@ class MainActivity : AppCompatActivity() {
     private var cropRect: Rect? = null
 
     private val readingVotes = mutableMapOf<String, Int>()
-    // --- OPTIMIZATION 2: Faster lock-on ---
-    private val REQUIRED_VOTES_TO_WIN = 2 // Was 3
+    private val REQUIRED_VOTES_TO_WIN = 2
     private val SCAN_TIMEOUT_MS = 3000L
     private var scanStartTime = 0L
     private var lastValidBitmap: Bitmap? = null
 
-    private lateinit var sensorManager: SensorManager
-    private var accelerometer: Sensor? = null
-    private val isDeviceSteady = AtomicBoolean(false)
-    private val lastAcceleration = FloatArray(3)
-    private var lastShakeTime: Long = 0
-    // --- OPTIMIZATION 2: Tuned motion filter ---
-    private val SHAKE_THRESHOLD = 1.0f // Was 0.8f, less strict
-    private val STEADY_DELAY_MS = 300 // Was 500, faster to acquire steady state
+    // --- Removed Motion Sensor Logic ---
 
     private val activityResultLauncher =
         registerForActivityResult(
@@ -108,13 +96,11 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         requestPermissions()
 
-        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        sensorManager.registerListener(sensorListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
+        // --- Removed Sensor Initialization ---
 
         binding.scanButton.setOnClickListener {
             readingVotes.clear()
-            lastValidBitmap?.recycle() // --- OPTIMIZATION 1: Clear old bitmap ---
+            lastValidBitmap?.recycle()
             lastValidBitmap = null
             isScanning.set(true)
             scanStartTime = System.currentTimeMillis()
@@ -129,7 +115,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.scanAgainButton.setOnClickListener {
             readingVotes.clear()
-            lastValidBitmap?.recycle() // --- OPTIMIZATION 1: Clear old bitmap ---
+            lastValidBitmap?.recycle()
             lastValidBitmap = null
             isScanning.set(false)
             binding.resultsContainer.visibility = View.GONE
@@ -139,38 +125,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val sensorListener = object : SensorEventListener {
-        override fun onSensorChanged(event: SensorEvent) {
-            if (event.sensor.type == Sensor.TYPE_ACCELEROMETER) {
-                val x = event.values[0]
-                val y = event.values[1]
-                val z = event.values[2]
-
-                val dx = x - lastAcceleration[0]
-                val dy = y - lastAcceleration[1]
-                val dz = z - lastAcceleration[2]
-
-                lastAcceleration[0] = x
-                lastAcceleration[1] = y
-                lastAcceleration[2] = z
-
-                val acceleration = sqrt(dx * dx + dy * dy + dz * dz)
-                val now = System.currentTimeMillis()
-
-                if (acceleration > SHAKE_THRESHOLD) {
-                    lastShakeTime = now
-                    isDeviceSteady.set(false)
-                } else {
-                    if (now - lastShakeTime > STEADY_DELAY_MS) {
-                        isDeviceSteady.set(true)
-                    }
-                }
-            }
-        }
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
-            // Not needed
-        }
-    }
+    // --- Removed Sensor Listener ---
 
     private fun setUiEnabled(isEnabled: Boolean) {
         val alphaValue = if (isEnabled) 1.0f else 0.5f
@@ -292,10 +247,7 @@ class MainActivity : AppCompatActivity() {
 
     @OptIn(ExperimentalGetImage::class)
     private fun analyzeImage(imageProxy: ImageProxy) {
-        if (!isDeviceSteady.get()) {
-            imageProxy.close()
-            return
-        }
+        // --- REMOVED: isDeviceSteady check ---
 
         if (!isScanning.get()) {
             imageProxy.close()
@@ -303,12 +255,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         val fullBitmap = imageProxyToBitmap(imageProxy)
-        // --- OPTIMIZATION 1: Recycle the *previous* bitmap ---
         lastValidBitmap?.recycle()
         lastValidBitmap = fullBitmap
 
-        val imageToProcess: Bitmap
-        val isCropped: Boolean
+        var imageToProcess: Bitmap
+        var isCropped: Boolean
         if (cropRect != null) {
             val previewWidth = binding.cameraPreview.width.toFloat()
             val previewHeight = binding.cameraPreview.height.toFloat()
@@ -321,12 +272,19 @@ class MainActivity : AppCompatActivity() {
             val cropWidth = (cropRect!!.width() * scaleX).toInt()
             val cropHeight = (cropRect!!.height() * scaleY).toInt()
 
-            if (cropLeft + cropWidth <= fullBitmap.width && cropTop + cropHeight <= fullBitmap.height) {
-                imageToProcess = Bitmap.createBitmap(fullBitmap, cropLeft, cropTop, cropWidth, cropHeight)
-                isCropped = true // This is a new bitmap
+            if (cropLeft + cropWidth <= fullBitmap.width && cropTop + cropHeight <= fullBitmap.height && cropWidth > 0 && cropHeight > 0) {
+                try {
+                    imageToProcess = Bitmap.createBitmap(fullBitmap, cropLeft, cropTop, cropWidth, cropHeight)
+                    isCropped = true
+                } catch (e: IllegalArgumentException) {
+                    Log.e(TAG, "Bitmap cropping error: ${e.message}")
+                    imageToProcess = fullBitmap // Fallback to full image on error
+                    isCropped = false
+                }
             } else {
+                Log.w(TAG, "Calculated crop rect is out of bounds or invalid, using full bitmap")
                 imageToProcess = fullBitmap
-                isCropped = false // This is just a reference
+                isCropped = false
             }
         } else {
             imageToProcess = fullBitmap
@@ -345,40 +303,124 @@ class MainActivity : AppCompatActivity() {
             }
             .addOnCompleteListener {
                 imageProxy.close()
-                // --- OPTIMIZATION 1: Recycle intermediate bitmaps ---
                 enhancedBitmap.recycle()
-                if (isCropped) {
-                    imageToProcess.recycle() // Recycle the cropped bitmap
+                if (isCropped && imageToProcess != fullBitmap) { // Only recycle if it's a separate bitmap
+                    imageToProcess.recycle()
                 }
             }
     }
 
+    // --- Sharpening filter re-added + Adaptive Thresholding ---
     private fun enhanceBitmapForOcr(bitmap: Bitmap): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
-        val enhancedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        if (width <= 0 || height <= 0) return bitmap // Return original if invalid dimensions
+
+        val sharpenedBitmap = applySharpeningFilter(bitmap) // Sharpening step re-added
         val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        sharpenedBitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        var totalLuminance: Long = 0
+        val grayPixels = IntArray(pixels.size)
 
         for (i in pixels.indices) {
             val pixel = pixels[i]
             val r = Color.red(pixel)
             val g = Color.green(pixel)
             val b = Color.blue(pixel)
-
             val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
-
-            val newColor = if (gray > 127) Color.WHITE else Color.BLACK
-            pixels[i] = newColor
+            grayPixels[i] = gray
+            totalLuminance += gray
         }
 
+        val avgLuminance = if (pixels.isNotEmpty()) (totalLuminance / pixels.size).toInt() else 128 // Use mid-gray if empty
+        val threshold = (avgLuminance * 0.9).toInt()
+
+        for (i in pixels.indices) {
+            pixels[i] = if (grayPixels[i] > threshold) Color.WHITE else Color.BLACK
+        }
+
+        val enhancedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         enhancedBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+
+        // Recycle the intermediate sharpened bitmap only if it's different from original
+        if (sharpenedBitmap != bitmap) {
+            sharpenedBitmap.recycle()
+        }
+
+
         return enhancedBitmap
     }
 
+    // --- Sharpening Filter Kernel re-added ---
+    private fun applySharpeningFilter(bitmap: Bitmap): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width < 3 || height < 3) return bitmap // Kernel needs neighbors
+
+        val resultBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        // Sharpening kernel
+        val kernel = arrayOf(
+            floatArrayOf(0f, -1f, 0f),
+            floatArrayOf(-1f, 5f, -1f),
+            floatArrayOf(0f, -1f, 0f)
+        )
+
+        // Apply kernel skipping edges
+        for (y in 1 until height - 1) {
+            for (x in 1 until width - 1) {
+                var sumR = 0f
+                var sumG = 0f
+                var sumB = 0f
+
+                for (ky in -1..1) {
+                    for (kx in -1..1) {
+                        val pixelIndex = (y + ky) * width + (x + kx)
+                        if (pixelIndex >= 0 && pixelIndex < pixels.size) { // Boundary check
+                            val pixel = pixels[pixelIndex]
+                            val kernelVal = kernel[ky + 1][kx + 1]
+                            sumR += Color.red(pixel) * kernelVal
+                            sumG += Color.green(pixel) * kernelVal
+                            sumB += Color.blue(pixel) * kernelVal
+                        }
+                    }
+                }
+
+                val r = min(255, max(0, sumR.toInt()))
+                val g = min(255, max(0, sumG.toInt()))
+                val b = min(255, max(0, sumB.toInt()))
+                if(x >= 0 && x < width && y >=0 && y < height) { // Double check bounds before setting pixel
+                    resultBitmap.setPixel(x, y, Color.rgb(r, g, b))
+                }
+            }
+        }
+        // Handle edges (copy original pixel values) - simple approach
+        for (y in 0 until height) {
+            if (width > 0) {
+                resultBitmap.setPixel(0, y, pixels[y * width]) // Left edge
+                resultBitmap.setPixel(width - 1, y, pixels[y * width + width - 1]) // Right edge
+            }
+        }
+        for (x in 0 until width) {
+            if (height > 0) {
+                resultBitmap.setPixel(x, 0, pixels[x]) // Top edge
+                resultBitmap.setPixel(x, height-1, pixels[(height-1)*width + x]) // Bottom edge
+            }
+        }
+
+        return resultBitmap
+    }
+
+
     private fun showResults(reading: String) {
-        if (lastValidBitmap != null) {
+        if (lastValidBitmap != null && !lastValidBitmap!!.isRecycled) { // Check if bitmap is valid
             binding.scannedImageView.setImageBitmap(lastValidBitmap)
+        } else {
+            binding.scannedImageView.setImageDrawable(null) // Clear if bitmap is invalid
+            Log.e(TAG, "lastValidBitmap was null or recycled in showResults")
         }
         binding.fullScreenText.text = reading
         binding.resultsContainer.visibility = View.VISIBLE
@@ -393,10 +435,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun processTextBlock(result: Text) {
         if (!isScanning.get()) return
-
-        if (result.text.length < 2) {
-            return
-        }
 
         val currentReading = extractMeterReading(result)
 
@@ -440,32 +478,132 @@ class MainActivity : AppCompatActivity() {
             .replace("Z", "2", true)
             .replace(",", ".")
             .replace(" ", "")
+            // Remove any non-numeric/non-decimal characters that might remain
+            .filter { it.isDigit() || it == '.' }
     }
 
+    // --- Parsing Logic with updated Regex and Priority ---
     private fun extractMeterReading(result: Text): String? {
-        val allLines = result.textBlocks.flatMap { it.lines }
-        if (allLines.isEmpty()) return null
+        val allElements = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }
+        if (allElements.isEmpty()) return null
 
         val units = setOf("KWH", "KVAH", "MD")
-        val allFoundReadings = mutableListOf<String>()
+        val validReadingPattern = Regex("""(0*\d{4,7}|\d+\.\d+|\.\d+)""")
+        val decimalReadingPattern = Regex(""".*\..*""") // Simple check for a decimal point
 
-        val numericPattern = Regex("""\b(\d{4,7}(?:\.\d{1,2})?)\b""")
+        val candidates = mutableListOf<Pair<String, Rect?>>()
 
-        for (line in allLines) {
-            val cleanedLineText = cleanText(line.text)
-            val hasUnit = units.any { cleanedLineText.uppercase().contains(it) }
-
-            val matches = numericPattern.findAll(cleanedLineText)
-            for (match in matches) {
-                val number = match.groupValues[1]
-
-                if (hasUnit) {
-                    return number
-                }
-                allFoundReadings.add(number)
+        // 1. Find all potential numbers and units, apply basic cleaning
+        for (element in allElements) {
+            // Relax confidence slightly if needed, but 0.3f is reasonable
+            if ((element.confidence ?: 0f) < 0.3f) continue
+            val cleanedText = cleanText(element.text)
+            // Find all occurrences within the cleaned text
+            // Use a simpler pattern first to find number-like strings
+            val numberLikePattern = Regex("""(\d+\.?\d*|\.\d+)""")
+            numberLikePattern.findAll(cleanedText).forEach { match ->
+                candidates.add(Pair(match.value, element.boundingBox))
             }
         }
-        return allFoundReadings.maxByOrNull { it.length }
+
+
+        val unitCandidates = allElements.mapNotNull { element ->
+            if ((element.confidence ?: 0f) < 0.3f) return@mapNotNull null
+            val unitCandidateText = element.text.uppercase()
+            if (units.any { unitCandidateText.contains(it) }) {
+                Pair(unitCandidateText, element.boundingBox)
+            } else {
+                null
+            }
+        }
+
+        val pairedReadings = mutableListOf<String>()
+        val decimalReadings = mutableListOf<String>()
+        val otherValidReadings = mutableListOf<String>()
+
+
+        // --- Categorize Readings ---
+        for ((number, numberBox) in candidates) {
+            // Re-validate against the stricter pattern here
+            if (!number.matches(validReadingPattern)) continue
+
+            var foundPair = false
+            // Check for Spatial Pair
+            for ((unit, unitBox) in unitCandidates) {
+                if (isUnitSpatiallyClose(numberBox, unitBox)) {
+                    pairedReadings.add(number)
+                    foundPair = true
+                    break // A number can only be paired once
+                }
+            }
+            if (foundPair) continue // Skip other checks if paired
+
+            // Check for Decimal
+            if (number.matches(decimalReadingPattern)) {
+                decimalReadings.add(number)
+                continue // Skip size check if decimal
+            }
+
+            // If no pair and no decimal, add to other valid readings
+            otherValidReadings.add(number)
+        }
+
+
+        // --- Apply Priorities ---
+        // Priority 1: Longest reading spatially paired with a unit
+        if (pairedReadings.isNotEmpty()) {
+            return pairedReadings.maxByOrNull { it.length }
+        }
+
+        // Priority 2: Longest reading containing a decimal point
+        if (decimalReadings.isNotEmpty()) {
+            return decimalReadings.maxByOrNull { it.length }
+        }
+
+        // Priority 3: Longest valid reading found anywhere
+        if (otherValidReadings.isNotEmpty()) {
+            return otherValidReadings.maxByOrNull { it.length }
+        }
+
+        return null // No valid reading found
+    }
+
+
+    /**
+     * Checks if a unit is spatially close to a number (left, right, or top).
+     * Increased tolerance.
+     */
+    private fun isUnitSpatiallyClose(numberBox: Rect?, unitBox: Rect?): Boolean {
+        if (numberBox == null || unitBox == null) return false
+
+        // --- IMPROVEMENT: More Tolerant Spatial Checks ---
+        // Use a larger multiplier for tolerance based on width AND height
+        val toleranceX = numberBox.width() * 5
+        val toleranceY = numberBox.height() * 2 // Allow more vertical difference
+
+        // 1. Check if unit is on the Right
+        // Allow centers to be within one full number height vertically
+        val isVerticallyAlignedRight = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
+        val isToTheRight = unitBox.left > numberBox.right
+        val isCloseHorizontallyRight = (unitBox.left - numberBox.right) < toleranceX
+        if (isVerticallyAlignedRight && isToTheRight && isCloseHorizontallyRight) return true
+
+        // 2. Check if unit is on the Left
+        // Allow centers to be within one full number height vertically
+        val isVerticallyAlignedLeft = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
+        val isToTheLeft = numberBox.left > unitBox.right
+        val isCloseHorizontallyLeft = (numberBox.left - unitBox.right) < toleranceX
+        if (isVerticallyAlignedLeft && isToTheLeft && isCloseHorizontallyLeft) return true
+
+
+        // 3. Check if unit is on Top
+        // Allow centers to be within one full number width horizontally
+        val isHorizontallyAlignedTop = abs(numberBox.centerX() - unitBox.centerX()) < numberBox.width()
+        val isAbove = numberBox.top > unitBox.bottom
+        val isCloseVertically = (numberBox.top - unitBox.bottom) < toleranceY
+        if (isHorizontallyAlignedTop && isAbove && isCloseVertically) return true
+
+        return false
     }
 
 
@@ -493,17 +631,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        sensorManager.unregisterListener(sensorListener)
+        // --- Removed Sensor Un-registration ---
     }
 
     override fun onResume() {
         super.onResume()
-        sensorManager.registerListener(sensorListener, accelerometer, SensorManager.SENSOR_DELAY_UI)
+        // --- Removed Sensor Registration ---
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        sensorManager.unregisterListener(sensorListener)
+        // --- Removed Sensor Un-registration ---
         cameraExecutor.shutdown()
         textRecognizer.close()
         lastValidBitmap?.recycle()
@@ -514,3 +652,4 @@ class MainActivity : AppCompatActivity() {
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 }
+
