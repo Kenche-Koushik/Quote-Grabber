@@ -2,7 +2,6 @@ package com.example.quotegrabber
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -470,38 +469,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // --- Updated cleanText to remove decimals ---
     private fun cleanText(text: String): String {
         return text.replace("O", "0", true)
             .replace("I", "1", true)
             .replace("S", "5", true)
             .replace("B", "8", true)
             .replace("Z", "2", true)
-            .replace(",", ".")
+            .replace(",", ".") // Keep replacing comma first
             .replace(" ", "")
-            // Remove any non-numeric/non-decimal characters that might remain
-            .filter { it.isDigit() || it == '.' }
+            // Remove decimal point and the digit immediately after it
+            .replace(Regex("\\.\\d"), "")
+            // Remove any remaining non-digit characters
+            .filter { it.isDigit() }
     }
 
-    // --- Parsing Logic with updated Regex and Priority ---
+    // --- Updated Parsing Logic to ignore decimals and require 4+ digits ---
     private fun extractMeterReading(result: Text): String? {
         val allElements = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }
         if (allElements.isEmpty()) return null
 
         val units = setOf("KWH", "KVAH", "MD")
-        val validReadingPattern = Regex("""(0*\d{4,7}|\d+\.\d+|\.\d+)""")
-        val decimalReadingPattern = Regex(""".*\..*""") // Simple check for a decimal point
+        // --- Updated Pattern: 4-7 digits, whole numbers only ---
+        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""")
 
         val candidates = mutableListOf<Pair<String, Rect?>>()
 
-        // 1. Find all potential numbers and units, apply basic cleaning
+        // 1. Find all potential numbers and units, apply cleaning (including decimal removal)
         for (element in allElements) {
-            // Relax confidence slightly if needed, but 0.3f is reasonable
             if ((element.confidence ?: 0f) < 0.3f) continue
+            // cleanText now removes decimals before we check
             val cleanedText = cleanText(element.text)
-            // Find all occurrences within the cleaned text
-            // Use a simpler pattern first to find number-like strings
-            val numberLikePattern = Regex("""(\d+\.?\d*|\.\d+)""")
-            numberLikePattern.findAll(cleanedText).forEach { match ->
+            // Find all occurrences that match the whole number pattern
+            validReadingPattern.findAll(cleanedText).forEach { match ->
                 candidates.add(Pair(match.value, element.boundingBox))
             }
         }
@@ -518,15 +518,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         val pairedReadings = mutableListOf<String>()
-        val decimalReadings = mutableListOf<String>()
-        val otherValidReadings = mutableListOf<String>()
+        val otherValidReadings = mutableListOf<String>() // All candidates are now valid whole numbers
 
 
         // --- Categorize Readings ---
         for ((number, numberBox) in candidates) {
-            // Re-validate against the stricter pattern here
-            if (!number.matches(validReadingPattern)) continue
-
+            // Validation is implicitly done by regex finding candidates
             var foundPair = false
             // Check for Spatial Pair
             for ((unit, unitBox) in unitCandidates) {
@@ -536,16 +533,10 @@ class MainActivity : AppCompatActivity() {
                     break // A number can only be paired once
                 }
             }
-            if (foundPair) continue // Skip other checks if paired
-
-            // Check for Decimal
-            if (number.matches(decimalReadingPattern)) {
-                decimalReadings.add(number)
-                continue // Skip size check if decimal
+            if (!foundPair) {
+                // Only add if it wasn't paired
+                otherValidReadings.add(number)
             }
-
-            // If no pair and no decimal, add to other valid readings
-            otherValidReadings.add(number)
         }
 
 
@@ -555,12 +546,7 @@ class MainActivity : AppCompatActivity() {
             return pairedReadings.maxByOrNull { it.length }
         }
 
-        // Priority 2: Longest reading containing a decimal point
-        if (decimalReadings.isNotEmpty()) {
-            return decimalReadings.maxByOrNull { it.length }
-        }
-
-        // Priority 3: Longest valid reading found anywhere
+        // Priority 2: Longest valid (whole number, 4-7 digits) reading found anywhere
         if (otherValidReadings.isNotEmpty()) {
             return otherValidReadings.maxByOrNull { it.length }
         }
@@ -591,7 +577,7 @@ class MainActivity : AppCompatActivity() {
         // 2. Check if unit is on the Left
         // Allow centers to be within one full number height vertically
         val isVerticallyAlignedLeft = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
-        val isToTheLeft = numberBox.left > unitBox.right
+        val isToTheLeft = numberBox.left > unitBox.right // Corrected condition
         val isCloseHorizontallyLeft = (numberBox.left - unitBox.right) < toleranceX
         if (isVerticallyAlignedLeft && isToTheLeft && isCloseHorizontallyLeft) return true
 
