@@ -45,6 +45,10 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
+// Data class to hold candidate information including height
+data class ReadingCandidate(val number: String, val box: Rect?, val height: Int)
+
+
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
@@ -484,29 +488,46 @@ class MainActivity : AppCompatActivity() {
             .filter { it.isDigit() }
     }
 
-    // --- Updated Parsing Logic to ignore decimals and require 4+ digits ---
+    // --- Parsing Logic with Bounding Box Consistency Check ---
     private fun extractMeterReading(result: Text): String? {
         val allElements = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }
         if (allElements.isEmpty()) return null
 
         val units = setOf("KWH", "KVAH", "MD")
-        // --- Updated Pattern: 4-7 digits, whole numbers only ---
-        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""")
+        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""") // Whole numbers, 4-7 digits
 
-        val candidates = mutableListOf<Pair<String, Rect?>>()
+        val candidates = mutableListOf<ReadingCandidate>()
 
-        // 1. Find all potential numbers and units, apply cleaning (including decimal removal)
+        // 1. Find all potential numbers, clean them, and store with height
         for (element in allElements) {
             if ((element.confidence ?: 0f) < 0.3f) continue
-            // cleanText now removes decimals before we check
-            val cleanedText = cleanText(element.text)
-            // Find all occurrences that match the whole number pattern
+            val cleanedText = cleanText(element.text) // Removes decimals
+
             validReadingPattern.findAll(cleanedText).forEach { match ->
-                candidates.add(Pair(match.value, element.boundingBox))
+                val number = match.value
+                val box = element.boundingBox
+                val height = box?.height() ?: 0
+                candidates.add(ReadingCandidate(number, box, height))
             }
+        }
+        if (candidates.isEmpty()) return null
+
+        // 2. Group candidates by height (allow 15% tolerance)
+        val heightGroups = candidates.groupBy { candidate ->
+            // Find the closest "bucket" based on height
+            candidates.minByOrNull { abs(it.height - candidate.height) }?.height ?: candidate.height
+        }.filterValues { group -> // Filter groups by tolerance
+            val avgHeight = group.map { it.height }.average()
+            group.all { abs(it.height - avgHeight) <= avgHeight * 0.15 }
         }
 
 
+        // 3. Find the group with the most candidates (most consistent height)
+        val mostConsistentGroup = heightGroups.maxByOrNull { it.value.size }?.value
+            ?: candidates // Fallback to all candidates if grouping fails
+
+
+        // 4. Find potential units
         val unitCandidates = allElements.mapNotNull { element ->
             if ((element.confidence ?: 0f) < 0.3f) return@mapNotNull null
             val unitCandidateText = element.text.uppercase()
@@ -518,38 +539,42 @@ class MainActivity : AppCompatActivity() {
         }
 
         val pairedReadings = mutableListOf<String>()
-        val otherValidReadings = mutableListOf<String>() // All candidates are now valid whole numbers
+        val otherValidReadings = mutableListOf<String>()
 
-
-        // --- Categorize Readings ---
-        for ((number, numberBox) in candidates) {
-            // Validation is implicitly done by regex finding candidates
+        // --- Categorize Readings *within the most consistent group* ---
+        for (candidate in mostConsistentGroup) {
             var foundPair = false
             // Check for Spatial Pair
             for ((unit, unitBox) in unitCandidates) {
-                if (isUnitSpatiallyClose(numberBox, unitBox)) {
-                    pairedReadings.add(number)
+                if (isUnitSpatiallyClose(candidate.box, unitBox)) {
+                    pairedReadings.add(candidate.number)
                     foundPair = true
                     break // A number can only be paired once
                 }
             }
             if (!foundPair) {
-                // Only add if it wasn't paired
-                otherValidReadings.add(number)
+                otherValidReadings.add(candidate.number)
             }
         }
 
 
         // --- Apply Priorities ---
-        // Priority 1: Longest reading spatially paired with a unit
+        // Priority 1: Longest reading (from consistent group) spatially paired with a unit
         if (pairedReadings.isNotEmpty()) {
             return pairedReadings.maxByOrNull { it.length }
         }
 
-        // Priority 2: Longest valid (whole number, 4-7 digits) reading found anywhere
+        // Priority 2: Longest valid reading (from consistent group) found anywhere
         if (otherValidReadings.isNotEmpty()) {
             return otherValidReadings.maxByOrNull { it.length }
         }
+
+        // Fallback: If height grouping failed, try longest from original candidates
+        if (mostConsistentGroup === candidates && candidates.isNotEmpty()){
+            Log.w(TAG,"Height consistency check failed, falling back to longest overall candidate.")
+            return candidates.maxByOrNull { it.number.length }?.number
+        }
+
 
         return null // No valid reading found
     }
@@ -638,4 +663,3 @@ class MainActivity : AppCompatActivity() {
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 }
-
