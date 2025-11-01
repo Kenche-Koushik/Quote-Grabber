@@ -47,9 +47,13 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-// Data class to hold candidate information including height
-// Note: We might not need height check anymore with spatial pairing, but keeping for potential future use.
-data class ReadingCandidate(val number: String, val box: Rect?, val height: Int)
+// Data class to hold candidate information for scoring
+data class ReadingCandidate(
+    val number: String,
+    val box: Rect?,
+    val height: Int,
+    var score: Int = 0
+)
 
 
 class MainActivity : AppCompatActivity() {
@@ -61,6 +65,7 @@ class MainActivity : AppCompatActivity() {
     private var camera: Camera? = null
     private var isFlashlightOn = false
     private var cropRect: Rect? = null
+    private var analysisCropRect: Rect? = null // Store the rect used for analysis
 
     private val readingVotes = mutableMapOf<String, Int>()
     private val REQUIRED_VOTES_TO_WIN = 2
@@ -266,6 +271,7 @@ class MainActivity : AppCompatActivity() {
 
         var imageToProcess: Bitmap? = null // Use nullable Bitmap
         var isCropped = false
+        analysisCropRect = null // Reset analysis rect
 
         if (cropRect != null && fullBitmap.width > 0 && fullBitmap.height > 0) {
             val previewWidth = binding.cameraPreview.width.toFloat()
@@ -307,6 +313,7 @@ class MainActivity : AppCompatActivity() {
                     // Create the cropped bitmap
                     imageToProcess = Bitmap.createBitmap(fullBitmap, finalLeft, finalTop, finalWidth, finalHeight)
                     isCropped = true
+                    analysisCropRect = Rect(0, 0, finalWidth, finalHeight) // Rect relative to the *cropped* bitmap
                     Log.d(TAG, "Successfully cropped image to: [$finalLeft, $finalTop, $finalWidth, $finalHeight]")
                 } catch (e: Exception) { // Catch broader exceptions
                     Log.e(TAG, "Bitmap cropping error: ${e.message}", e)
@@ -323,6 +330,7 @@ class MainActivity : AppCompatActivity() {
             Log.w(TAG, "Cropping failed or not attempted, using full bitmap for analysis.")
             imageToProcess = fullBitmap
             isCropped = false // Ensure isCropped reflects the fallback
+            analysisCropRect = Rect(0, 0, fullBitmap.width, fullBitmap.height)
         }
 
 
@@ -353,14 +361,15 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    // --- Adaptive Thresholding Only ---
+    // --- Adaptive Thresholding Only (Sharpening Removed) ---
     private fun enhanceBitmapForOcr(bitmap: Bitmap): Bitmap {
         val width = bitmap.width
         val height = bitmap.height
         if (width <= 0 || height <= 0) return bitmap
 
+        // REMOVED: Sharpening step
         val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height) // Get pixels from original bitmap
 
         var totalLuminance: Long = 0
         val grayPixels = IntArray(pixels.size)
@@ -385,14 +394,20 @@ class MainActivity : AppCompatActivity() {
         val enhancedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         enhancedBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
 
+        // REMOVED: Recycling of intermediate sharpened bitmap
+
         return enhancedBitmap
     }
 
+    // --- REMOVED: applySharpeningFilter function ---
+
+
     private fun showResults(reading: String) {
-        if (lastValidBitmap != null && !lastValidBitmap!!.isRecycled) {
+        if (lastValidBitmap != null && !lastValidBitmap!!.isRecycled) { // Check if bitmap is valid
+            // Display the *uncropped* bitmap saved earlier
             binding.scannedImageView.setImageBitmap(lastValidBitmap)
         } else {
-            binding.scannedImageView.setImageDrawable(null)
+            binding.scannedImageView.setImageDrawable(null) // Clear if bitmap is invalid
             Log.e(TAG, "lastValidBitmap was null or recycled in showResults")
         }
         binding.fullScreenText.text = reading
@@ -409,7 +424,7 @@ class MainActivity : AppCompatActivity() {
     private fun processTextBlock(result: Text) {
         if (!isScanning.get()) return
 
-        val currentReading = extractMeterReading(result)
+        val currentReading = extractMeterReading(result, analysisCropRect)
 
         runOnUiThread {
             if (System.currentTimeMillis() - scanStartTime > SCAN_TIMEOUT_MS) {
@@ -443,69 +458,114 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // --- Updated cleanText to remove decimals ---
+    // --- Updated cleanText with more replacements ---
     private fun cleanText(text: String): String {
-        return text.uppercase()
+        return text.uppercase() // Convert to uppercase for consistent replacement
             .replace("O", "0")
             .replace("I", "1")
-            .replace("L", "1")
-            .replace("Z", "2")
-            .replace("S", "5")
-            .replace("B", "8")
-            .replace("G", "6")
-            .replace("Q", "0")
-            .replace(",", ".") // Still replace comma first
+            .replace("L", "1") // L -> 1
+            .replace("Z", "2") // Z -> 2
+            .replace("S", "5") // S -> 5
+            .replace("B", "8") // B -> 8
+            .replace("G", "6") // G -> 6 (less common, but possible)
+            .replace("Q", "0") // Q -> 0 (less common)
+            .replace(",", ".")
             .replace(" ", "")
-            .replace(Regex("\\.\\d"), "") // Remove decimal and digit after it
+            .replace(Regex("\\.\\d+"), "") // Remove decimal and ALL digits after it
             .filter { it.isDigit() }
     }
 
-    // --- New Parsing Logic: Prioritize Spatial Pairing ---
-    private fun extractMeterReading(result: Text): String? {
-        val allElements = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }
-        if (allElements.isEmpty()) return null
+    // --- NEW: Parsing Logic with Scoring System (Line-based) ---
+    private fun extractMeterReading(result: Text, analysisCropRect: Rect?): String? {
+        val allLines = result.textBlocks.flatMap { it.lines }
+        val allElements = allLines.flatMap { it.elements }
+        if (allElements.isEmpty() || analysisCropRect == null) return null
 
         val units = setOf("KWH", "KVAH", "MD")
-        // Pattern for a valid meter reading (4-7 digits, whole number)
-        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""")
+        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""") // Whole numbers, 4-7 digits
+        val imageCenterY = analysisCropRect.centerY()
+        val maxLineHeight = allLines.maxOfOrNull { it.boundingBox?.height() ?: 0 } ?: 0
 
-        // Data structure to hold potential readings and their locations
-        data class PotentialReading(val text: String, val box: Rect?)
+        val candidates = mutableListOf<ReadingCandidate>()
 
-        val numberCandidates = mutableListOf<PotentialReading>()
-        val unitCandidates = mutableListOf<PotentialReading>()
-
-        // 1. Find all potential numbers and units, apply cleaning
-        for (element in allElements) {
-            if ((element.confidence ?: 0f) < 0.3f) continue // Confidence filter
-
-            val cleanedText = cleanText(element.text) // Removes decimals, non-digits
-            if (cleanedText.matches(validReadingPattern)) {
-                numberCandidates.add(PotentialReading(cleanedText, element.boundingBox))
-            }
-
-            val upperText = element.text.uppercase()
-            if (units.any { upperText.contains(it) }) {
-                unitCandidates.add(PotentialReading(upperText, element.boundingBox))
+        // 1. Find all potential units (from elements, for better location accuracy)
+        val unitCandidates = allElements.mapNotNull { element ->
+            if ((element.confidence ?: 0f) < 0.3f) return@mapNotNull null
+            val unitCandidateText = element.text.uppercase()
+            if (units.any { unitCandidateText.contains(it) }) {
+                Pair(unitCandidateText, element.boundingBox)
+            } else {
+                null
             }
         }
 
-        if (numberCandidates.isEmpty()) return null // No valid numbers found
+        // 2. Find and Score all number candidates *from lines*
+        for (line in allLines) {
+            if ((line.confidence ?: 0f) < 0.3f) continue
 
-        // --- Priority 1: Find a spatial pair ---
-        for (numCandidate in numberCandidates) {
-            for (unitCandidate in unitCandidates) {
-                if (isUnitSpatiallyClose(numCandidate.box, unitCandidate.box)) {
-                    // Found a number spatially close to a unit. This is our highest confidence match.
-                    return numCandidate.text
+            // This cleaning joins fragmented numbers like "4495 5" into "44955"
+            val cleanedLineText = cleanText(line.text)
+
+            validReadingPattern.findAll(cleanedLineText).forEach { match ->
+                val number = match.value
+                val box = line.boundingBox // Use the whole line's box
+                val height = box?.height() ?: 0
+
+                if (height > 5) { // Basic sanity check
+                    val candidate = ReadingCandidate(number, box, height)
+
+                    // Score the candidate
+                    // P1: Spatial Pair (+10) - STRONGEST SIGNAL
+                    // Check if any unit is close to this *line's* bounding box
+                    for ((_, unitBox) in unitCandidates) {
+                        if (isUnitSpatiallyClose(candidate.box, unitBox)) {
+                            candidate.score += 10
+                            break
+                        }
+                    }
+
+                    // P2: Size Score (+5) - VERY STRONG SIGNAL
+                    if (maxLineHeight > 0 && height >= maxLineHeight * 0.7) {
+                        candidate.score += 5
+                    }
+
+                    // P3: Center Score (+1) - WEAK SIGNAL (tie-breaker)
+                    if (box != null && abs(box.centerY() - imageCenterY) < (imageCenterY * 0.25)) {
+                        candidate.score += 1
+                    }
+
+                    // Add only if it has *some* score, or if it's the only thing found
+                    if (candidate.score > 0) {
+                        candidates.add(candidate)
+                    }
                 }
             }
         }
 
-        // --- Priority 2: Fallback to the longest valid number ---
-        // If no spatial pair was found, return the longest number that fits the pattern.
-        // This helps in cases where the unit isn't recognized or is far away.
-        return numberCandidates.maxByOrNull { it.text.length }?.text
+        if (candidates.isEmpty()) {
+            // Fallback: If scoring found nothing, just find the longest valid number from any line
+            for (line in allLines) {
+                val cleanedText = cleanText(line.text)
+                validReadingPattern.findAll(cleanedText).forEach { match ->
+                    candidates.add(ReadingCandidate(match.value, line.boundingBox, line.boundingBox?.height() ?: 0))
+                }
+            }
+            if (candidates.isEmpty()) return null
+            return candidates.maxByOrNull { it.number.length }?.number
+        }
+
+        // 3. Find the best candidate
+        val maxScore = candidates.maxOfOrNull { it.score } ?: 0
+
+        if (maxScore == 0) {
+            return candidates.maxByOrNull { it.number.length }?.number
+        }
+
+        // Find all candidates with the max score
+        val topCandidates = candidates.filter { it.score == maxScore }
+
+        // Among the top-scoring, return the longest one
+        return topCandidates.maxByOrNull { it.number.length }?.number
     }
 
 
@@ -516,33 +576,26 @@ class MainActivity : AppCompatActivity() {
     private fun isUnitSpatiallyClose(numberBox: Rect?, unitBox: Rect?): Boolean {
         if (numberBox == null || unitBox == null) return false
 
-        val toleranceX = numberBox.width() * 5 // Search wider horizontally
-        val toleranceY = numberBox.height() * 2 // Search taller vertically
+        val toleranceX = numberBox.width() * 5
+        val toleranceY = numberBox.height() * 2
 
-        // 1. Check Right: Unit's left edge is within toleranceX of number's right edge
-        val isVerticallyAlignedRight = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height() // Center Y within 1x number height
-        val isToTheRight = unitBox.left >= numberBox.right // Unit starts at or after number ends
+        // 1. Check Right
+        val isVerticallyAlignedRight = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
+        val isToTheRight = unitBox.left > numberBox.right
         val isCloseHorizontallyRight = (unitBox.left - numberBox.right) < toleranceX
         if (isVerticallyAlignedRight && isToTheRight && isCloseHorizontallyRight) return true
 
-        // 2. Check Left: Number's left edge is within toleranceX of unit's right edge
+        // 2. Check Left
         val isVerticallyAlignedLeft = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
-        val isToTheLeft = numberBox.left >= unitBox.right // Number starts at or after unit ends
+        val isToTheLeft = numberBox.left > unitBox.right // Corrected condition
         val isCloseHorizontallyLeft = (numberBox.left - unitBox.right) < toleranceX
         if (isVerticallyAlignedLeft && isToTheLeft && isCloseHorizontallyLeft) return true
 
-        // 3. Check Top: Number's top edge is within toleranceY of unit's bottom edge
-        val isHorizontallyAlignedTop = abs(numberBox.centerX() - unitBox.centerX()) < numberBox.width() // Center X within 1x number width
-        val isAbove = numberBox.top >= unitBox.bottom // Number starts at or below unit ends
+        // 3. Check Top
+        val isHorizontallyAlignedTop = abs(numberBox.centerX() - unitBox.centerX()) < numberBox.width()
+        val isAbove = numberBox.top > unitBox.bottom
         val isCloseVertically = (numberBox.top - unitBox.bottom) < toleranceY
         if (isHorizontallyAlignedTop && isAbove && isCloseVertically) return true
-
-        // (Optional: Check Bottom - if units can appear below)
-        // val isHorizontallyAlignedBottom = abs(numberBox.centerX() - unitBox.centerX()) < numberBox.width()
-        // val isBelow = unitBox.top >= numberBox.bottom
-        // val isCloseVerticallyBottom = (unitBox.top - numberBox.bottom) < toleranceY
-        // if (isHorizontallyAlignedBottom && isBelow && isCloseVerticallyBottom) return true
-
 
         return false
     }
