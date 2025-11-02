@@ -325,18 +325,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // If cropping failed or wasn't attempted, use the full bitmap
+        // If cropping failed or wasn't attempted, do not process
         if (imageToProcess == null) {
-            Log.w(TAG, "Cropping failed or not attempted, using full bitmap for analysis.")
-            imageToProcess = fullBitmap
-            isCropped = false // Ensure isCropped reflects the fallback
-            analysisCropRect = Rect(0, 0, fullBitmap.width, fullBitmap.height)
-        }
-
-
-        // --- Ensure imageToProcess is not null before proceeding ---
-        if (imageToProcess == null) {
-            Log.e(TAG, "imageToProcess became null unexpectedly.")
+            Log.w(TAG, "Cropping failed, skipping frame.")
             imageProxy.close()
             return
         }
@@ -458,30 +449,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // --- Updated cleanText with more replacements ---
+    // --- Updated cleanText: ONLY does character swaps and space removal ---
     private fun cleanText(text: String): String {
-        return text.uppercase() // Convert to uppercase for consistent replacement
+        return text.uppercase()
             .replace("O", "0")
             .replace("I", "1")
-            .replace("L", "1") // L -> 1
-            .replace("Z", "2") // Z -> 2
-            .replace("S", "5") // S -> 5
-            .replace("B", "8") // B -> 8
-            .replace("G", "6") // G -> 6 (less common, but possible)
-            .replace("Q", "0") // Q -> 0 (less common)
-            .replace(",", ".")
-            .replace(" ", "")
-            .replace(Regex("\\.\\d+"), "") // Remove decimal and ALL digits after it
-            .filter { it.isDigit() }
+            .replace("L", "1")
+            .replace("Z", "2")
+            .replace("S", "5")
+            .replace("B", "8")
+            .replace("G", "6")
+            .replace("Q", "0")
+            .replace(",", ".") // replace comma with dot
+            .replace(" ", "") // remove spaces
+        // DO NOT filter digits or remove decimals here
     }
 
     // --- NEW: Parsing Logic with Scoring System (Line-based) ---
     private fun extractMeterReading(result: Text, analysisCropRect: Rect?): String? {
         val allLines = result.textBlocks.flatMap { it.lines }
-        val allElements = allLines.flatMap { it.elements }
-        if (allElements.isEmpty() || analysisCropRect == null) return null
+        val allElements = allLines.flatMap { it.elements } // Still needed for units
+        if (allLines.isEmpty() || analysisCropRect == null) return null
 
         val units = setOf("KWH", "KVAH", "MD")
+        // --- This is the pattern for the FINAL, cleaned number ---
         val validReadingPattern = Regex("""\b(0*\d{4,7})\b""") // Whole numbers, 4-7 digits
         val imageCenterY = analysisCropRect.centerY()
         val maxLineHeight = allLines.maxOfOrNull { it.boundingBox?.height() ?: 0 } ?: 0
@@ -506,17 +497,26 @@ class MainActivity : AppCompatActivity() {
             // This cleaning joins fragmented numbers like "4495 5" into "44955"
             val cleanedLineText = cleanText(line.text)
 
-            validReadingPattern.findAll(cleanedLineText).forEach { match ->
-                val number = match.value
-                val box = line.boundingBox // Use the whole line's box
-                val height = box?.height() ?: 0
+            // Find numbers, ignoring decimals
+            // This regex finds whole numbers OR numbers with decimals
+            val regex = Regex("""(0*\d{3,7})(?:\.\d+)?|(\d+\.\d+)""")
 
-                if (height > 5) { // Basic sanity check
-                    val candidate = ReadingCandidate(number, box, height)
+            regex.findAll(cleanedLineText).forEach { match ->
+                // Get the captured group, preferring the whole number part
+                val numberString = match.groupValues[1].ifEmpty { match.groupValues[2] }
+
+                // Now, remove the decimal part for a final, clean number
+                val finalCleanedNumber = numberString.replace(Regex("\\..*"), "").filter { it.isDigit() }
+
+                // Validate against our strict 4-7 digit pattern
+                if (finalCleanedNumber.matches(validReadingPattern)) {
+                    val box = line.boundingBox // Use the whole line's box
+                    val height = box?.height() ?: 0
+
+                    val candidate = ReadingCandidate(finalCleanedNumber, box, height)
 
                     // Score the candidate
-                    // P1: Spatial Pair (+10) - STRONGEST SIGNAL
-                    // Check if any unit is close to this *line's* bounding box
+                    // P1: Spatial Pair (+10)
                     for ((_, unitBox) in unitCandidates) {
                         if (isUnitSpatiallyClose(candidate.box, unitBox)) {
                             candidate.score += 10
@@ -524,17 +524,16 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    // P2: Size Score (+5) - VERY STRONG SIGNAL
+                    // P2: Size Score (+5)
                     if (maxLineHeight > 0 && height >= maxLineHeight * 0.7) {
                         candidate.score += 5
                     }
 
-                    // P3: Center Score (+1) - WEAK SIGNAL (tie-breaker)
+                    // P3: Center Score (+1)
                     if (box != null && abs(box.centerY() - imageCenterY) < (imageCenterY * 0.25)) {
                         candidate.score += 1
                     }
 
-                    // Add only if it has *some* score, or if it's the only thing found
                     if (candidate.score > 0) {
                         candidates.add(candidate)
                     }
@@ -543,21 +542,24 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (candidates.isEmpty()) {
-            // Fallback: If scoring found nothing, just find the longest valid number from any line
-            for (line in allLines) {
-                val cleanedText = cleanText(line.text)
-                validReadingPattern.findAll(cleanedText).forEach { match ->
-                    candidates.add(ReadingCandidate(match.value, line.boundingBox, line.boundingBox?.height() ?: 0))
+            // Fallback: If no scored candidates, just find the longest valid number from any line
+            val fallbackCandidates = allLines.mapNotNull { line ->
+                val cleanedText = cleanText(line.text).replace(Regex("\\..*"), "").filter { it.isDigit() }
+                if (cleanedText.matches(validReadingPattern)) {
+                    ReadingCandidate(cleanedText, line.boundingBox, line.boundingBox?.height() ?: 0)
+                } else {
+                    null
                 }
             }
-            if (candidates.isEmpty()) return null
-            return candidates.maxByOrNull { it.number.length }?.number
+            if (fallbackCandidates.isEmpty()) return null
+            return fallbackCandidates.maxByOrNull { it.number.length }?.number
         }
 
         // 3. Find the best candidate
         val maxScore = candidates.maxOfOrNull { it.score } ?: 0
 
         if (maxScore == 0) {
+            // If no one scored (e.g., no unit, all same size), just use the longest valid one
             return candidates.maxByOrNull { it.number.length }?.number
         }
 
@@ -646,3 +648,4 @@ class MainActivity : AppCompatActivity() {
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 }
+
