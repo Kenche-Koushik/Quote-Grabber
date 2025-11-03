@@ -489,7 +489,7 @@ class MainActivity : AppCompatActivity() {
         // DO NOT filter digits or remove decimals here
     }
 
-    // --- Parsing Logic with Element Stitching AND Font Size Consistency ---
+    // --- NEW: Parsing Logic with Element Stitching AND Font Size Consistency ---
     private fun extractMeterReading(result: Text, analysisCropRect: Rect?): String? {
         val allElements = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }
         if (allElements.isEmpty() || analysisCropRect == null) return null
@@ -521,13 +521,21 @@ class MainActivity : AppCompatActivity() {
         // 4. --- NEW: Filter by Font Size Consistency ---
         if (stitchedCandidates.isEmpty()) return null
 
-        // Find the "main" font size by grouping and finding the most common height
-        val heightGroups = stitchedCandidates
-            .filter { it.box != null && it.height > 5 } // Only consider valid candidates
-            .groupBy { it.height / 5 } // Group by height in "buckets" of 5 pixels
+        val maxElementHeight = stitchedCandidates.maxOfOrNull { it.height } ?: 0
+        if (maxElementHeight == 0) return null // No valid elements found
 
-        val mostConsistentGroup = heightGroups.maxByOrNull { it.value.size }?.value
-            ?: stitchedCandidates // Fallback to all if grouping fails
+        // --- THIS IS THE STRICT FONT SIZE LOGIC ---
+        // Keep only elements that are at least 75% of the max height
+        val heightThreshold = maxElementHeight * 0.75f
+        val mostConsistentGroup = stitchedCandidates.filter {
+            it.box != null && it.height > 5 && it.height >= heightThreshold
+        }
+
+        if (mostConsistentGroup.isEmpty()) {
+            Log.w(TAG, "No candidates passed the height filter.")
+            return null // No numbers were large enough
+        }
+
 
         // 5. Score all candidates *from the most consistent group*
         val finalCandidates = mutableListOf<ReadingCandidate>()
@@ -545,14 +553,8 @@ class MainActivity : AppCompatActivity() {
                         break
                     }
                 }
-                // P2: Size Score (+5)
-                val maxElementHeight = allElements.maxOfOrNull { it.boundingBox?.height() ?: 0 } ?: 0
-                if (maxElementHeight > 0 && height >= maxElementHeight * 0.7) {
-                    candidate.score += 5
-                }
 
-
-                // P3: Center Score (+1)
+                // P2: Center Score (+1)
                 if (box != null && abs(box.centerY() - imageCenterY) < (imageCenterY * 0.25)) {
                     candidate.score += 1
                 }
@@ -562,18 +564,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (finalCandidates.isEmpty()) {
-            // Fallback: If no scored candidates, check *all* stitched candidates (even w/o score)
-            val fallbackCandidates = stitchedCandidates.mapNotNull { (numberString, box, height) ->
-                val finalCleanedNumber = numberString.replace(Regex("\\..*"), "").filter { it.isDigit() } // Remove decimal and ALL digits after it
-                if (finalCleanedNumber.matches(validReadingPattern)) {
-                    ReadingCandidate(finalCleanedNumber, box, height)
-                } else {
-                    null
-                }
-            }
-            if (fallbackCandidates.isEmpty()) return null
-            // Return longest valid number from this fallback list
-            return fallbackCandidates.maxByOrNull { it.number.length }?.number
+            Log.w(TAG, "No candidates passed validation after scoring.")
+            return null
         }
 
         // 6. Find the best candidate
@@ -708,4 +700,3 @@ class MainActivity : AppCompatActivity() {
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 }
-
