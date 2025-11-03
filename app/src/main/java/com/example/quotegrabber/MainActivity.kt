@@ -37,6 +37,8 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup // <-- Import for the fix
+import androidx.camera.core.ViewPort // <-- Import for the fix
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -162,44 +164,66 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             try {
                 val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(binding.cameraPreview.surfaceProvider)
-                }
 
-                val resolutionSelector = ResolutionSelector.Builder()
-                    .setResolutionStrategy(
-                        ResolutionStrategy(
-                            Size(1280, 720),
-                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                        )
-                    ).build()
-
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setResolutionSelector(resolutionSelector)
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also {
-                        it.setAnalyzer(cameraExecutor, ::analyzeImage)
+                // --- FIX: Wait for the view to be laid out to get the ViewPort ---
+                binding.cameraPreview.post {
+                    val viewPort = binding.cameraPreview.viewPort ?: run {
+                        Log.e(TAG, "ViewPort is null, cannot bind camera")
+                        return@post
                     }
 
-                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                cameraProvider.unbindAll()
-                camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
+                    val preview = Preview.Builder()
+                        .setTargetRotation(binding.cameraPreview.display.rotation)
+                        .build()
+                        .also {
+                            it.setSurfaceProvider(binding.cameraPreview.surfaceProvider)
+                        }
 
-                setupCameraControls()
+                    val resolutionSelector = ResolutionSelector.Builder()
+                        .setResolutionStrategy(
+                            ResolutionStrategy(
+                                Size(1280, 720),
+                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                            )
+                        ).build()
 
-                binding.framingGuide.post { updateCropRect() }
+                    val imageAnalysis = ImageAnalysis.Builder()
+                        .setTargetRotation(binding.cameraPreview.display.rotation)
+                        .setResolutionSelector(resolutionSelector)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                        .also {
+                            it.setAnalyzer(cameraExecutor, ::analyzeImage)
+                        }
 
-                binding.cameraPreview.setOnTouchListener { view, motionEvent ->
-                    if (motionEvent.action == MotionEvent.ACTION_DOWN) {
-                        val factory = binding.cameraPreview.meteringPointFactory
-                        val point = factory.createPoint(motionEvent.x, motionEvent.y)
-                        val action = FocusMeteringAction.Builder(point).build()
-                        camera?.cameraControl?.startFocusAndMetering(action)
-                        view.performClick()
+                    // --- FIX: Group UseCases and set the ViewPort ---
+                    val useCaseGroup = UseCaseGroup.Builder()
+                        .addUseCase(preview)
+                        .addUseCase(imageAnalysis)
+                        .setViewPort(viewPort) // This links the zoom/crop of preview and analysis
+                        .build()
+
+                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                    cameraProvider.unbindAll()
+
+                    // --- FIX: Bind the UseCaseGroup, not the individual cases ---
+                    camera = cameraProvider.bindToLifecycle(this, cameraSelector, useCaseGroup)
+
+                    // These must be called *after* the camera is bound
+                    setupCameraControls()
+                    binding.framingGuide.post { updateCropRect() }
+
+                    binding.cameraPreview.setOnTouchListener { view, motionEvent ->
+                        if (motionEvent.action == MotionEvent.ACTION_DOWN) {
+                            val factory = binding.cameraPreview.meteringPointFactory
+                            val point = factory.createPoint(motionEvent.x, motionEvent.y)
+                            val action = FocusMeteringAction.Builder(point).build()
+                            camera?.cameraControl?.startFocusAndMetering(action)
+                            view.performClick()
+                        }
+                        true
                     }
-                    true
-                }
+                } // End of cameraPreview.post
 
             } catch (exc: Exception) {
                 Log.e(TAG, "Use case binding failed", exc)
@@ -265,6 +289,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // --- The bitmap received here is NOW correctly zoomed/cropped by the camera ---
         val fullBitmap = imageProxyToBitmap(imageProxy)
         lastValidBitmap?.recycle() // Recycle previous full bitmap
         lastValidBitmap = fullBitmap // Keep reference to the *uncropped* bitmap for display
@@ -273,6 +298,7 @@ class MainActivity : AppCompatActivity() {
         var isCropped = false
         analysisCropRect = null // Reset analysis rect
 
+        // --- Our manual crop logic now crops from the *already-zoomed* image ---
         if (cropRect != null && fullBitmap.width > 0 && fullBitmap.height > 0) {
             val previewWidth = binding.cameraPreview.width.toFloat()
             val previewHeight = binding.cameraPreview.height.toFloat()
@@ -289,14 +315,12 @@ class MainActivity : AppCompatActivity() {
 
             val scaleX = bitmapWidth / previewWidth
             val scaleY = bitmapHeight / previewHeight
-            val paddingX = (cropRect!!.width() * scaleX * 0.05f).toInt()
-            val paddingY = (cropRect!!.height() * scaleY * 0.1f).toInt()
 
-            // Calculate padded crop coordinates
-            val desiredLeft = (cropRect!!.left * scaleX).toInt() - paddingX
-            val desiredTop = (cropRect!!.top * scaleY).toInt() - paddingY
-            val desiredRight = (cropRect!!.right * scaleX).toInt() + paddingX
-            val desiredBottom = (cropRect!!.bottom * scaleY).toInt() + paddingY
+            // --- STRICT CROP: Remove all padding ---
+            val desiredLeft = (cropRect!!.left * scaleX).toInt()
+            val desiredTop = (cropRect!!.top * scaleY).toInt()
+            val desiredRight = (cropRect!!.right * scaleX).toInt()
+            val desiredBottom = (cropRect!!.bottom * scaleY).toInt()
 
             // --- Robust Boundary Check ---
             val finalLeft = max(0, desiredLeft)
@@ -320,16 +344,16 @@ class MainActivity : AppCompatActivity() {
                     // Fallback handled below by checking if imageToProcess is null
                 }
             } else {
-                Log.w(TAG, "Calculated crop rect has zero or negative dimensions after clamping.")
+                Log.w(TAG, "Calculated crop rect has zero or negative dimensions.")
                 // Fallback handled below
             }
         }
 
-        // If cropping failed or wasn't attempted, do not process
+        // --- FIX: If cropping fails, DO NOT process the full image. Skip the frame. ---
         if (imageToProcess == null) {
-            Log.w(TAG, "Cropping failed, skipping frame.")
-            imageProxy.close()
-            return
+            Log.w(TAG, "Cropping failed or not attempted, skipping frame.")
+            imageProxy.close() // Make sure to close the proxy
+            return // EXIT THE FUNCTION
         }
 
         val enhancedBitmap = enhanceBitmapForOcr(imageToProcess) // Enhance the potentially cropped image
@@ -465,21 +489,16 @@ class MainActivity : AppCompatActivity() {
         // DO NOT filter digits or remove decimals here
     }
 
-    // --- NEW: Parsing Logic with Scoring System (Line-based) ---
+    // --- Parsing Logic with Element Stitching AND Font Size Consistency ---
     private fun extractMeterReading(result: Text, analysisCropRect: Rect?): String? {
-        val allLines = result.textBlocks.flatMap { it.lines }
-        val allElements = allLines.flatMap { it.elements } // Still needed for units
-        if (allLines.isEmpty() || analysisCropRect == null) return null
+        val allElements = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }
+        if (allElements.isEmpty() || analysisCropRect == null) return null
 
         val units = setOf("KWH", "KVAH", "MD")
-        // --- This is the pattern for the FINAL, cleaned number ---
-        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""") // Whole numbers, 4-7 digits
         val imageCenterY = analysisCropRect.centerY()
-        val maxLineHeight = allLines.maxOfOrNull { it.boundingBox?.height() ?: 0 } ?: 0
+        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""") // 4-7 digits
 
-        val candidates = mutableListOf<ReadingCandidate>()
-
-        // 1. Find all potential units (from elements, for better location accuracy)
+        // 1. Find all potential units
         val unitCandidates = allElements.mapNotNull { element ->
             if ((element.confidence ?: 0f) < 0.3f) return@mapNotNull null
             val unitCandidateText = element.text.uppercase()
@@ -490,84 +509,125 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 2. Find and Score all number candidates *from lines*
-        for (line in allLines) {
-            if ((line.confidence ?: 0f) < 0.3f) continue
+        // 2. Find all number elements and clean them
+        val numberElements = allElements
+            .sortedBy { it.boundingBox?.left ?: 0 } // Sort left-to-right
+            .map { Pair(cleanText(it.text), it) } // Clean text
+            .filter { (it.first.matches(Regex("""^[\d\.]+$"""))) && (it.second.confidence ?: 0f) >= 0.3f } // Keep only numbers/decimals
 
-            // This cleaning joins fragmented numbers like "4495 5" into "44955"
-            val cleanedLineText = cleanText(line.text)
+        // 3. Stitch adjacent number elements
+        val stitchedCandidates = stitchAdjacentElements(numberElements)
 
-            // Find numbers, ignoring decimals
-            // This regex finds whole numbers OR numbers with decimals
-            val regex = Regex("""(0*\d{3,7})(?:\.\d+)?|(\d+\.\d+)""")
+        // 4. --- NEW: Filter by Font Size Consistency ---
+        if (stitchedCandidates.isEmpty()) return null
 
-            regex.findAll(cleanedLineText).forEach { match ->
-                // Get the captured group, preferring the whole number part
-                val numberString = match.groupValues[1].ifEmpty { match.groupValues[2] }
+        // Find the "main" font size by grouping and finding the most common height
+        val heightGroups = stitchedCandidates
+            .filter { it.box != null && it.height > 5 } // Only consider valid candidates
+            .groupBy { it.height / 5 } // Group by height in "buckets" of 5 pixels
 
-                // Now, remove the decimal part for a final, clean number
-                val finalCleanedNumber = numberString.replace(Regex("\\..*"), "").filter { it.isDigit() }
+        val mostConsistentGroup = heightGroups.maxByOrNull { it.value.size }?.value
+            ?: stitchedCandidates // Fallback to all if grouping fails
 
-                // Validate against our strict 4-7 digit pattern
-                if (finalCleanedNumber.matches(validReadingPattern)) {
-                    val box = line.boundingBox // Use the whole line's box
-                    val height = box?.height() ?: 0
+        // 5. Score all candidates *from the most consistent group*
+        val finalCandidates = mutableListOf<ReadingCandidate>()
+        for ((numberString, box, height) in mostConsistentGroup) {
+            // Now, remove decimals and filter for valid reading format
+            val finalCleanedNumber = numberString.replace(Regex("\\..*"), "").filter { it.isDigit() } // Remove decimal and ALL digits after it
 
-                    val candidate = ReadingCandidate(finalCleanedNumber, box, height)
+            if (finalCleanedNumber.matches(validReadingPattern)) {
+                val candidate = ReadingCandidate(finalCleanedNumber, box, height)
 
-                    // Score the candidate
-                    // P1: Spatial Pair (+10)
-                    for ((_, unitBox) in unitCandidates) {
-                        if (isUnitSpatiallyClose(candidate.box, unitBox)) {
-                            candidate.score += 10
-                            break
-                        }
-                    }
-
-                    // P2: Size Score (+5)
-                    if (maxLineHeight > 0 && height >= maxLineHeight * 0.7) {
-                        candidate.score += 5
-                    }
-
-                    // P3: Center Score (+1)
-                    if (box != null && abs(box.centerY() - imageCenterY) < (imageCenterY * 0.25)) {
-                        candidate.score += 1
-                    }
-
-                    if (candidate.score > 0) {
-                        candidates.add(candidate)
+                // P1: Spatial Pair (+10)
+                for ((_, unitBox) in unitCandidates) {
+                    if (isUnitSpatiallyClose(candidate.box, unitBox)) {
+                        candidate.score += 10
+                        break
                     }
                 }
+                // P2: Size Score (+5)
+                val maxElementHeight = allElements.maxOfOrNull { it.boundingBox?.height() ?: 0 } ?: 0
+                if (maxElementHeight > 0 && height >= maxElementHeight * 0.7) {
+                    candidate.score += 5
+                }
+
+
+                // P3: Center Score (+1)
+                if (box != null && abs(box.centerY() - imageCenterY) < (imageCenterY * 0.25)) {
+                    candidate.score += 1
+                }
+
+                finalCandidates.add(candidate) // Add all valid candidates from the group
             }
         }
 
-        if (candidates.isEmpty()) {
-            // Fallback: If no scored candidates, just find the longest valid number from any line
-            val fallbackCandidates = allLines.mapNotNull { line ->
-                val cleanedText = cleanText(line.text).replace(Regex("\\..*"), "").filter { it.isDigit() }
-                if (cleanedText.matches(validReadingPattern)) {
-                    ReadingCandidate(cleanedText, line.boundingBox, line.boundingBox?.height() ?: 0)
+        if (finalCandidates.isEmpty()) {
+            // Fallback: If no scored candidates, check *all* stitched candidates (even w/o score)
+            val fallbackCandidates = stitchedCandidates.mapNotNull { (numberString, box, height) ->
+                val finalCleanedNumber = numberString.replace(Regex("\\..*"), "").filter { it.isDigit() } // Remove decimal and ALL digits after it
+                if (finalCleanedNumber.matches(validReadingPattern)) {
+                    ReadingCandidate(finalCleanedNumber, box, height)
                 } else {
                     null
                 }
             }
             if (fallbackCandidates.isEmpty()) return null
+            // Return longest valid number from this fallback list
             return fallbackCandidates.maxByOrNull { it.number.length }?.number
         }
 
-        // 3. Find the best candidate
-        val maxScore = candidates.maxOfOrNull { it.score } ?: 0
+        // 6. Find the best candidate
+        val maxScore = finalCandidates.maxOfOrNull { it.score } ?: 0
 
-        if (maxScore == 0) {
-            // If no one scored (e.g., no unit, all same size), just use the longest valid one
-            return candidates.maxByOrNull { it.number.length }?.number
+        val topCandidates = if (maxScore > 0) {
+            finalCandidates.filter { it.score == maxScore } // Get all with max score
+        } else {
+            finalCandidates // If no one scored, consider all from the consistent group
         }
 
-        // Find all candidates with the max score
-        val topCandidates = candidates.filter { it.score == maxScore }
-
-        // Among the top-scoring, return the longest one
+        // Among the top candidates, return the longest one
         return topCandidates.maxByOrNull { it.number.length }?.number
+    }
+
+    // --- Helper function to stitch number elements ---
+    private fun stitchAdjacentElements(elements: List<Pair<String, Text.Element>>): List<ReadingCandidate> {
+        val stitchedList = mutableListOf<ReadingCandidate>()
+        var i = 0
+        while (i < elements.size) {
+            var currentText = elements[i].first
+            var currentBox = elements[i].second.boundingBox?.let { Rect(it) } // Make a copy
+            var currentHeight = currentBox?.height() ?: 0
+            var j = i + 1
+
+            // Check next elements
+            while (j < elements.size) {
+                val nextText = elements[j].first
+                val nextBox = elements[j].second.boundingBox
+                if (currentBox == null || nextBox == null) break // Can't compare
+
+                if (nextText.matches(Regex("""^[\d\.]+$"""))) {
+                    val horizontalGap = nextBox.left - currentBox.right
+                    val verticalOverlap = max(0, min(currentBox.bottom, nextBox.bottom) - max(currentBox.top, nextBox.top))
+
+                    // Stitch if horizontally adjacent (gap < 2.0x height) AND vertical overlap > 30%
+                    if (horizontalGap < (currentHeight * 2.0) && verticalOverlap > (currentHeight * 0.3)) {
+                        currentText += nextText // Stitch text
+                        currentBox.right = nextBox.right // Extend box
+                        currentBox.top = min(currentBox.top, nextBox.top) // Extend box
+                        currentBox.bottom = max(currentBox.bottom, nextBox.bottom) // Extend box
+                        currentHeight = max(currentHeight, nextBox.height()) // Use max height
+                        j++ // Keep checking next element
+                    } else {
+                        break // Not adjacent, stop stitching
+                    }
+                } else {
+                    break // Not a number, stop stitching
+                }
+            }
+            stitchedList.add(ReadingCandidate(currentText, currentBox, currentHeight))
+            i = j // Move to the next unstitch element
+        }
+        return stitchedList
     }
 
 
