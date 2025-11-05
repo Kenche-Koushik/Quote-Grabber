@@ -541,7 +541,9 @@ class MainActivity : AppCompatActivity() {
         val finalCandidates = mutableListOf<ReadingCandidate>()
         for ((numberString, box, height) in mostConsistentGroup) {
             // Now, remove decimals and filter for valid reading format
-            val finalCleanedNumber = numberString.replace(Regex("\\..*"), "").filter { it.isDigit() } // Remove decimal and ALL digits after it
+            val regex = Regex("(\\d+)(?:\\.\\d+)?")
+            val match = regex.find(numberString)
+            val finalCleanedNumber = match?.groupValues?.get(1)?.replace(Regex("[^0-9]"), "") ?: ""
 
             if (finalCleanedNumber.matches(validReadingPattern)) {
                 val candidate = ReadingCandidate(finalCleanedNumber, box, height)
