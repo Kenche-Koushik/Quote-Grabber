@@ -37,6 +37,10 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
+    // This is no longer needed as we are not using the BOM
+    // dependenciesInfo {
+    //     includeInApk = true
+    // }
 }
 
 dependencies {
@@ -52,7 +56,7 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
 
     // CameraX dependencies
-    val cameraxVersion = "1.5.0"
+    val cameraxVersion = "1.3.3"
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")

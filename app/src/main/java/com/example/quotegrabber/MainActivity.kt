@@ -300,52 +300,46 @@ class MainActivity : AppCompatActivity() {
 
         // --- Our manual crop logic now crops from the *already-zoomed* image ---
         if (cropRect != null && fullBitmap.width > 0 && fullBitmap.height > 0) {
-            val previewWidth = binding.cameraPreview.width.toFloat()
-            val previewHeight = binding.cameraPreview.height.toFloat()
-            val bitmapWidth = fullBitmap.width.toFloat()
-            val bitmapHeight = fullBitmap.height.toFloat()
+            val previewWidth = binding.cameraPreview.width
+            val previewHeight = binding.cameraPreview.height
 
-            // --- Ensure scale factors are valid ---
-            if (previewWidth == 0f || previewHeight == 0f) {
-                Log.e(TAG, "Preview dimensions are zero, cannot calculate scale.")
+            if (previewWidth == 0 || previewHeight == 0) {
+                Log.e(TAG, "Preview dimensions are zero, cannot map crop rect.")
                 imageProxy.close()
                 return
             }
 
+            // Map the on-screen framing box (in PreviewView coordinates)
+            // to the underlying bitmap coordinates assuming PreviewView's
+            // default scale type (FILL_CENTER). This handles center-crop
+            // and prevents reading outside the guide even with aspect-mismatch.
+            val mapped = mapViewRectToBitmapRect(
+                cropRect!!,
+                previewWidth,
+                previewHeight,
+                fullBitmap.width,
+                fullBitmap.height
+            )
 
-            val scaleX = bitmapWidth / previewWidth
-            val scaleY = bitmapHeight / previewHeight
+            val finalLeft = mapped.left.coerceIn(0, fullBitmap.width)
+            val finalTop = mapped.top.coerceIn(0, fullBitmap.height)
+            val finalRight = mapped.right.coerceIn(0, fullBitmap.width)
+            val finalBottom = mapped.bottom.coerceIn(0, fullBitmap.height)
 
-            // --- STRICT CROP: Remove all padding ---
-            val desiredLeft = (cropRect!!.left * scaleX).toInt()
-            val desiredTop = (cropRect!!.top * scaleY).toInt()
-            val desiredRight = (cropRect!!.right * scaleX).toInt()
-            val desiredBottom = (cropRect!!.bottom * scaleY).toInt()
-
-            // --- Robust Boundary Check ---
-            val finalLeft = max(0, desiredLeft)
-            val finalTop = max(0, desiredTop)
-            val finalRight = min(fullBitmap.width, desiredRight)
-            val finalBottom = min(fullBitmap.height, desiredBottom)
-
-            // Ensure width and height are positive after clamping
-            val finalWidth = finalRight - finalLeft
-            val finalHeight = finalBottom - finalTop
+            val finalWidth = (finalRight - finalLeft).coerceAtLeast(0)
+            val finalHeight = (finalBottom - finalTop).coerceAtLeast(0)
 
             if (finalWidth > 0 && finalHeight > 0) {
                 try {
-                    // Create the cropped bitmap
                     imageToProcess = Bitmap.createBitmap(fullBitmap, finalLeft, finalTop, finalWidth, finalHeight)
                     isCropped = true
-                    analysisCropRect = Rect(0, 0, finalWidth, finalHeight) // Rect relative to the *cropped* bitmap
-                    Log.d(TAG, "Successfully cropped image to: [$finalLeft, $finalTop, $finalWidth, $finalHeight]")
-                } catch (e: Exception) { // Catch broader exceptions
+                    analysisCropRect = Rect(0, 0, finalWidth, finalHeight)
+                    Log.d(TAG, "Crop OK: [l=$finalLeft, t=$finalTop, w=$finalWidth, h=$finalHeight]")
+                } catch (e: Exception) {
                     Log.e(TAG, "Bitmap cropping error: ${e.message}", e)
-                    // Fallback handled below by checking if imageToProcess is null
                 }
             } else {
-                Log.w(TAG, "Calculated crop rect has zero or negative dimensions.")
-                // Fallback handled below
+                Log.w(TAG, "Mapped crop has non-positive size. Skipping frame.")
             }
         }
 
@@ -525,15 +519,15 @@ class MainActivity : AppCompatActivity() {
         if (maxElementHeight == 0) return null // No valid elements found
 
         // --- THIS IS THE STRICT FONT SIZE LOGIC ---
-        // Keep only elements that are at least 75% of the max height
-        val heightThreshold = maxElementHeight * 0.75f
+        // Keep only elements that are at least 92% of the max height (aggressively drop small text)
+        val heightThreshold = (maxElementHeight * 0.92f)
         val mostConsistentGroup = stitchedCandidates.filter {
-            it.box != null && it.height > 5 && it.height >= heightThreshold
+            it.box != null && it.height > 6 && it.height >= heightThreshold
         }
 
         if (mostConsistentGroup.isEmpty()) {
-            Log.w(TAG, "No candidates passed the height filter.")
-            return null // No numbers were large enough
+            Log.w(TAG, "No candidates passed the strict height filter (>=92% of max).")
+            return null
         }
 
 
@@ -581,6 +575,34 @@ class MainActivity : AppCompatActivity() {
 
         // Among the top candidates, return the longest one
         return topCandidates.maxByOrNull { it.number.length }?.number
+    }
+
+    // --- Helper: map a PreviewView rect to bitmap rect for FILL_CENTER behavior ---
+    private fun mapViewRectToBitmapRect(viewRect: Rect, viewW: Int, viewH: Int, bmpW: Int, bmpH: Int): Rect {
+        if (viewW <= 0 || viewH <= 0 || bmpW <= 0 || bmpH <= 0) return Rect(0, 0, bmpW, bmpH)
+
+        // Scale used by PreviewView to draw image (FILL_CENTER):
+        // image is scaled by s so that it fills the view; larger dimension crops.
+        val scale = max(viewW.toFloat() / bmpW.toFloat(), viewH.toFloat() / bmpH.toFloat())
+
+        // Displayed image size inside the view after scaling
+        val dispW = bmpW * scale
+        val dispH = bmpH * scale
+
+        // Because of center-crop, portions may be cut off. Compute offsets so we can
+        // translate from view coords to image coords.
+        val offX = (dispW - viewW) / 2f
+        val offY = (dispH - viewH) / 2f
+
+        fun mapX(x: Int): Int = ((x + offX) / scale).toInt()
+        fun mapY(y: Int): Int = ((y + offY) / scale).toInt()
+
+        val left = mapX(viewRect.left).coerceIn(0, bmpW)
+        val top = mapY(viewRect.top).coerceIn(0, bmpH)
+        val right = mapX(viewRect.right).coerceIn(0, bmpW)
+        val bottom = mapY(viewRect.bottom).coerceIn(0, bmpH)
+
+        return Rect(min(left, right), min(top, bottom), max(left, right), max(top, bottom))
     }
 
     // --- Helper function to stitch number elements ---
