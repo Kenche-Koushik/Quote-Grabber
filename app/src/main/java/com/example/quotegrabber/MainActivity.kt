@@ -70,6 +70,11 @@ class MainActivity : AppCompatActivity() {
     private var analysisCropRect: Rect? = null // Store the rect used for analysis
 
     private val readingVotes = mutableMapOf<String, Int>()
+
+    // --- NEW: OCR stability lock ---
+    private var lastFrameReading: String? = null
+    private var readingStabilityScore = 0
+    private val STABILITY_THRESHOLD = 6
     private val REQUIRED_VOTES_TO_WIN = 2
     private val SCAN_TIMEOUT_MS = 3000L
     private var scanStartTime = 0L
@@ -440,7 +445,7 @@ class MainActivity : AppCompatActivity() {
                 isScanning.set(false)
                 setUiEnabled(true)
 
-                val winner = readingVotes.maxByOrNull { it.value }?.key
+                val winner = lastFrameReading ?: readingVotes.maxByOrNull { it.value }?.key
                 if (winner != null) {
                     showResults(winner)
                 } else {
@@ -455,6 +460,24 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (currentReading != null) {
+                // --- NEW: Stability check using character similarity ---
+                if (lastFrameReading != null) {
+                    val d = textDistance(lastFrameReading!!, currentReading)
+                    if (d <= 1) {
+                        readingStabilityScore++
+                    } else {
+                        readingStabilityScore = 0
+                    }
+                }
+                lastFrameReading = currentReading
+
+                if (readingStabilityScore >= STABILITY_THRESHOLD) {
+                    isScanning.set(false)
+                    setUiEnabled(true)
+                    showResults(currentReading)
+                    return@runOnUiThread
+                }
+
                 val currentVotes = readingVotes.getOrDefault(currentReading, 0) + 1
                 readingVotes[currentReading] = currentVotes
 
@@ -466,6 +489,20 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    // --- Levenshtein distance ---
+    private fun textDistance(a: String, b: String): Int {
+        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+        for (i in a.indices) dp[i + 1][0] = i + 1
+        for (j in b.indices) dp[0][j + 1] = j + 1
+        for (i in a.indices) for (j in b.indices) {
+            dp[i + 1][j + 1] = if (a[i] == b[j]) dp[i][j]
+            else 1 + minOf(dp[i][j], dp[i][j + 1], dp[i + 1][j])
+        }
+        return dp[a.length][b.length]
+    }
+
+
 
     // --- Updated cleanText: ONLY does character swaps and space removal ---
     private fun cleanText(text: String): String {
