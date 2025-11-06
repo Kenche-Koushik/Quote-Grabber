@@ -485,7 +485,15 @@ class MainActivity : AppCompatActivity() {
 
     // --- NEW: Parsing Logic with Element Stitching AND Font Size Consistency ---
     private fun extractMeterReading(result: Text, analysisCropRect: Rect?): String? {
-        val allElements = result.textBlocks.flatMap { it.lines }.flatMap { it.elements }
+        val allElements = result.textBlocks
+            .flatMap { it.lines }
+            .flatMap { it.elements }
+            .filter { element ->
+                val box = element.boundingBox
+                analysisCropRect != null && box != null &&
+                        analysisCropRect.contains(box.left, box.top) &&
+                        analysisCropRect.contains(box.right, box.bottom)
+            }
         if (allElements.isEmpty() || analysisCropRect == null) return null
 
         val units = setOf("KWH", "KVAH", "MD")
@@ -520,7 +528,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- THIS IS THE STRICT FONT SIZE LOGIC ---
         // Keep only elements that are at least 92% of the max height (aggressively drop small text)
-        val heightThreshold = (maxElementHeight * 0.92f)
+        val heightThreshold = (maxElementHeight * 0.70f) // allow 30% variation for mechanical wheels
         val mostConsistentGroup = stitchedCandidates.filter {
             it.box != null && it.height > 6 && it.height >= heightThreshold
         }
@@ -534,10 +542,14 @@ class MainActivity : AppCompatActivity() {
         // 5. Score all candidates *from the most consistent group*
         val finalCandidates = mutableListOf<ReadingCandidate>()
         for ((numberString, box, height) in mostConsistentGroup) {
-            // Now, remove decimals and filter for valid reading format
-            val regex = Regex("(\\d+)(?:\\.\\d+)?")
-            val match = regex.find(numberString)
-            val finalCleanedNumber = match?.groupValues?.get(1)?.replace(Regex("[^0-9]"), "") ?: ""
+            // Mechanical meter: drop red fractional wheel (often smaller)
+            var cleanedNum = numberString
+            val avgDigitWidth = (box?.width() ?: 0) / cleanedNum.length.toFloat()
+// Drop last digit if it is likely the red fractional wheel
+            if (cleanedNum.length > 1 && (height < maxElementHeight * 0.85f || avgDigitWidth < maxElementHeight * 0.55f)) {
+                cleanedNum = cleanedNum.dropLast(1)
+            }
+            val finalCleanedNumber = cleanedNum.substringBefore('.').filter { it.isDigit() }
 
             if (finalCleanedNumber.matches(validReadingPattern)) {
                 val candidate = ReadingCandidate(finalCleanedNumber, box, height)
