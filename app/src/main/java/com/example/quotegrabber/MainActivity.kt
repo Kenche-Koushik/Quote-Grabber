@@ -120,8 +120,13 @@ class MainActivity : AppCompatActivity() {
             readingVotes.clear()
             lastValidBitmap?.recycle()
             lastValidBitmap = null
-            isScanning.set(true)
+
+            // ✅ Reset stability memory for clean scan
+            lastFrameReading = null
+            readingStabilityScore = 0
             scanStartTime = System.currentTimeMillis()
+
+            isScanning.set(true)
             Toast.makeText(this, "Scanning... Hold steady.", Toast.LENGTH_SHORT).show()
 
             setUiEnabled(false)
