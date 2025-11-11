@@ -27,4 +27,3 @@ androidx-window = { group = "androidx.window", name = "window", version.ref = "w
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
-

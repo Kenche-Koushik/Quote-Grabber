@@ -363,17 +363,20 @@ class MainActivity : AppCompatActivity() {
         val enhancedBitmap = enhanceBitmapForOcr(imageToProcess) // Enhance the potentially cropped image
         val image = InputImage.fromBitmap(enhancedBitmap, 0)
 
+        // Keep a color copy (same size as enhancedBitmap) for red detection
+        val colorRef = imageToProcess.copy(Bitmap.Config.ARGB_8888, false)
+
         textRecognizer.process(image)
             .addOnSuccessListener { visionText ->
-                processTextBlock(visionText)
+                processTextBlock(visionText, colorRef)
             }
             .addOnFailureListener { e ->
                 Log.e(TAG, "Text recognition failed", e)
             }
             .addOnCompleteListener {
+                try { colorRef.recycle() } catch (_: Exception) {}
                 imageProxy.close()
                 enhancedBitmap.recycle()
-                // Only recycle imageToProcess if it's a *new* bitmap created by cropping
                 if (isCropped && imageToProcess != fullBitmap) {
                     imageToProcess.recycle()
                 }
@@ -386,40 +389,55 @@ class MainActivity : AppCompatActivity() {
         val height = bitmap.height
         if (width <= 0 || height <= 0) return bitmap
 
-        // REMOVED: Sharpening step
         val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height) // Get pixels from original bitmap
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
         var totalLuminance: Long = 0
-        val grayPixels = IntArray(pixels.size)
+        val gray = IntArray(pixels.size)
 
         for (i in pixels.indices) {
-            val pixel = pixels[i]
-            val r = Color.red(pixel)
-            val g = Color.green(pixel)
-            val b = Color.blue(pixel)
-            val gray = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
-            grayPixels[i] = gray
-            totalLuminance += gray
+            val p = pixels[i]
+            val r = Color.red(p)
+            val g = Color.green(p)
+            val b = Color.blue(p)
+            val y = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+            gray[i] = y
+            totalLuminance += y
         }
 
-        val avgLuminance = if (pixels.isNotEmpty()) (totalLuminance / pixels.size).toInt() else 128
-        val threshold = (avgLuminance * 0.95).toInt() // Tuned threshold
+        val avg = if (gray.isNotEmpty()) (totalLuminance / gray.size).toInt() else 128
+        val threshold = (avg * 0.90).toInt() // slightly more foreground retained
 
-        for (i in pixels.indices) {
-            pixels[i] = if (grayPixels[i] > threshold) Color.WHITE else Color.BLACK
+        // Binarize
+        for (i in gray.indices) {
+            pixels[i] = if (gray[i] > threshold) Color.WHITE else Color.BLACK
         }
 
-        val enhancedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        enhancedBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+        // --- NEW: Morphological Dilation (3x3) to fatten thin digits (especially "1") ---
+        val dilated = pixels.copyOf()
+        for (y in 1 until height - 1) {
+            for (x in 1 until width - 1) {
+                val idx = y * width + x
+                if (pixels[idx] == Color.BLACK) {
+                    // If any neighbor is black, keep black
+                    var keepBlack = false
+                    for (dy in -1..1) for (dx in -1..1) {
+                        if (pixels[(y + dy) * width + (x + dx)] == Color.BLACK) {
+                            keepBlack = true
+                            break
+                        }
+                    }
+                    dilated[idx] = if (keepBlack) Color.BLACK else Color.WHITE
+                }
+            }
+        }
 
-        // REMOVED: Recycling of intermediate sharpened bitmap
-
-        return enhancedBitmap
+        val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        out.setPixels(dilated, 0, width, 0, 0, width, height)
+        return out
     }
 
     // --- REMOVED: applySharpeningFilter function ---
-
 
     private fun showResults(reading: String) {
         if (lastValidBitmap != null && !lastValidBitmap!!.isRecycled) { // Check if bitmap is valid
@@ -440,10 +458,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun processTextBlock(result: Text) {
+    private fun processTextBlock(result: Text, colorBitmap: Bitmap) {
         if (!isScanning.get()) return
 
-        val currentReading = extractMeterReading(result, analysisCropRect)
+        val currentReading = extractMeterReading(result, analysisCropRect, colorBitmap)
 
         runOnUiThread {
             if (System.currentTimeMillis() - scanStartTime > SCAN_TIMEOUT_MS) {
@@ -525,8 +543,51 @@ class MainActivity : AppCompatActivity() {
         // DO NOT filter digits or remove decimals here
     }
 
+    // Detect if a region is predominantly red (works for red fill or strong red border)
+    private fun isRegionRed(bmp: Bitmap, rectIn: Rect): Boolean {
+        if (bmp.width <= 0 || bmp.height <= 0) return false
+        val rect = Rect(
+            rectIn.left.coerceIn(0, bmp.width - 1),
+            rectIn.top.coerceIn(0, bmp.height - 1),
+            rectIn.right.coerceIn(1, bmp.width),
+            rectIn.bottom.coerceIn(1, bmp.height)
+        )
+        if (rect.width() <= 1 || rect.height() <= 1) return false
+
+        var reds = 0
+        var total = 0
+        // coarse grid sampling to keep fast
+        val stepX = max(1, rect.width() / 24)
+        val stepY = max(1, rect.height() / 12)
+
+        for (y in rect.top until rect.bottom step stepY) {
+            for (x in rect.left until rect.right step stepX) {
+                val c = bmp.getPixel(x, y)
+                val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
+                // red dominance threshold: robust to lighting
+                if (r > 120 && r > (g + b) * 0.9 && r > max(g, b) * 1.25) {
+                    reds++
+                }
+                total++
+            }
+        }
+        val ratio = if (total == 0) 0f else reds.toFloat() / total
+        return ratio > 0.18f  // tuneable
+    }
+
+    private fun rightSlice(box: Rect, w: Int): Rect {
+        val sliceW = w.coerceAtLeast(1)
+        return Rect(box.right - sliceW, box.top, box.right, box.bottom)
+    }
+
+    private fun insetPct(r: Rect, pct: Float): Rect {
+        val dx = (r.width() * pct).toInt()
+        val dy = (r.height() * pct).toInt()
+        return Rect(r.left + dx, r.top + dy, r.right - dx, r.bottom - dy)
+    }
+
     // --- NEW: Parsing Logic with Element Stitching AND Font Size Consistency ---
-    private fun extractMeterReading(result: Text, analysisCropRect: Rect?): String? {
+    private fun extractMeterReading(result: Text, analysisCropRect: Rect?, colorBitmap: Bitmap): String? {
         val allElements = result.textBlocks
             .flatMap { it.lines }
             .flatMap { it.elements }
@@ -570,7 +631,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- THIS IS THE STRICT FONT SIZE LOGIC ---
         // Keep only elements that are at least 92% of the max height (aggressively drop small text)
-        val heightThreshold = (maxElementHeight * 0.70f) // allow 30% variation for mechanical wheels
+        val heightThreshold = (maxElementHeight * 0.80f) // allow 30% variation for mechanical wheels
         val mostConsistentGroup = stitchedCandidates.filter {
             it.box != null && it.height > 6 && it.height >= heightThreshold
         }
@@ -580,23 +641,47 @@ class MainActivity : AppCompatActivity() {
             return null
         }
 
-
         // 5. Score all candidates *from the most consistent group*
         val finalCandidates = mutableListOf<ReadingCandidate>()
         for ((numberString, box, height) in mostConsistentGroup) {
-            // Mechanical meter: drop red fractional wheel (often smaller)
             var cleanedNum = numberString
-            val avgDigitWidth = (box?.width() ?: 0) / cleanedNum.length.toFloat()
-// Drop last digit if it is likely the red fractional wheel
-            if (cleanedNum.length > 1 && (height < maxElementHeight * 0.85f || avgDigitWidth < maxElementHeight * 0.55f)) {
+            val h = height.toFloat()
+            val w = (box?.width() ?: 0).toFloat()
+            val avgDigitW = if (cleanedNum.isNotEmpty()) w / cleanedNum.length else w
+
+            // 1) Stronger size-based check for mechanical fractional wheel
+            val likelyFractionalTail = cleanedNum.length >= 5 && (
+                    h < maxElementHeight * 0.92f ||
+                            avgDigitW < h * 0.62f
+                    )
+
+            // 2) Pixel-color red check (works for full red fill AND red border only)
+            var redTail = false
+            if (box != null && cleanedNum.length >= 2) {
+                val lastW = avgDigitW.toInt().coerceAtLeast(2)
+                val lastRect = rightSlice(box, lastW)
+                val inner = insetPct(lastRect, 0.12f)     // center region of last digit
+                val redFill = isRegionRed(colorBitmap, inner)
+
+                // detect red border if center is not red
+                val border = Rect(lastRect).apply { inset(-(lastW * 0.25f).toInt(), 0) }
+                val redEdge = !redFill && isRegionRed(colorBitmap, border)
+
+                redTail = redFill || redEdge
+            }
+
+            if ((likelyFractionalTail || redTail) && cleanedNum.length > 1) {
                 cleanedNum = cleanedNum.dropLast(1)
             }
-            val finalCleanedNumber = cleanedNum.substringBefore('.').filter { it.isDigit() }
+
+            // keep only digits before decimal
+            val finalCleanedNumber = cleanedNum.substringBefore('.')
+                .replace(Regex("[^0-9]"), "")
 
             if (finalCleanedNumber.matches(validReadingPattern)) {
                 val candidate = ReadingCandidate(finalCleanedNumber, box, height)
 
-                // P1: Spatial Pair (+10)
+                // P1: Spatial unit proximity
                 for ((_, unitBox) in unitCandidates) {
                     if (isUnitSpatiallyClose(candidate.box, unitBox)) {
                         candidate.score += 10
@@ -604,12 +689,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                // P2: Center Score (+1)
+                // P2: Vertical centering importance
                 if (box != null && abs(box.centerY() - imageCenterY) < (imageCenterY * 0.25)) {
                     candidate.score += 1
                 }
 
-                finalCandidates.add(candidate) // Add all valid candidates from the group
+                finalCandidates.add(candidate)
             }
         }
 
