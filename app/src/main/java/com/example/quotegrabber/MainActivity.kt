@@ -2,7 +2,6 @@ package com.example.quotegrabber
 
 import android.Manifest
 import android.annotation.SuppressLint
-// Removed unused Context import
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -11,25 +10,15 @@ import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.os.Bundle
-import androidx.activity.enableEdgeToEdge
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import com.example.quotegrabber.databinding.ActivityMainBinding
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.atomic.AtomicBoolean
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions // Correct import
-import java.util.concurrent.Executors
 import android.util.Log
 import android.util.Size
 import android.view.MotionEvent
 import android.view.View
 import android.widget.Toast
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
+import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
@@ -37,61 +26,66 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
-import androidx.camera.core.UseCaseGroup // <-- Import for the fix
-import androidx.camera.core.ViewPort // <-- Import for the fix
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
-import com.google.mlkit.vision.text.TextRecognition // Keep this import
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import com.example.quotegrabber.databinding.ActivityMainBinding
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-// Data class to hold candidate information for scoring
-data class ReadingCandidate(
+// Used during candidate selection
+private data class ReadingCandidate(
     val number: String,
     val box: Rect?,
     val height: Int,
     var score: Int = 0
 )
 
-
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var textRecognizer: TextRecognizer
+
     private val isScanning = AtomicBoolean(false)
     private var camera: Camera? = null
     private var isFlashlightOn = false
+
+    // Framing + crop
     private var cropRect: Rect? = null
-    private var analysisCropRect: Rect? = null // Store the rect used for analysis
+    private var analysisCropRect: Rect? = null
 
+    // Voting & stability
     private val readingVotes = mutableMapOf<String, Int>()
-
-    // --- NEW: OCR stability lock ---
     private var lastFrameReading: String? = null
     private var readingStabilityScore = 0
+
+    // Tunables
     private val STABILITY_THRESHOLD = 3
     private val REQUIRED_VOTES_TO_WIN = 2
     private val SCAN_TIMEOUT_MS = 3000L
+
     private var scanStartTime = 0L
     private var lastValidBitmap: Bitmap? = null
 
-    // --- Removed Motion Sensor Logic ---
-
     private val activityResultLauncher =
-        registerForActivityResult(
-            ActivityResultContracts.RequestMultiplePermissions())
-        { permissions ->
-            var permissionGranted = true
-            permissions.entries.forEach {
-                if (it.key in REQUIRED_PERMISSIONS && !it.value)
-                    permissionGranted = false
-            }
-            if (!permissionGranted) {
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            val granted = REQUIRED_PERMISSIONS.all { perm -> permissions[perm] == true }
+            if (!granted) {
                 Toast.makeText(this, "Permission request denied", Toast.LENGTH_SHORT).show()
             } else {
                 startCamera()
@@ -110,58 +104,44 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) // Use specific latin options
+        // ML Kit Text Recognizer (V1 Latin) — matches dependency
+        textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         cameraExecutor = Executors.newSingleThreadExecutor()
         requestPermissions()
 
-        // --- Removed Sensor Initialization ---
-
         binding.scanButton.setOnClickListener {
+            // Fresh scan
             readingVotes.clear()
-            lastValidBitmap?.recycle()
-            lastValidBitmap = null
-
-            // ✅ Reset stability memory for clean scan
+            lastValidBitmap?.recycle(); lastValidBitmap = null
             lastFrameReading = null
             readingStabilityScore = 0
             scanStartTime = System.currentTimeMillis()
-
             isScanning.set(true)
             Toast.makeText(this, "Scanning... Hold steady.", Toast.LENGTH_SHORT).show()
-
             setUiEnabled(false)
         }
 
-        binding.flashlightButton.setOnClickListener {
-            toggleFlashlight()
-        }
+        binding.flashlightButton.setOnClickListener { toggleFlashlight() }
 
         binding.scanAgainButton.setOnClickListener {
             readingVotes.clear()
-            lastValidBitmap?.recycle()
-            lastValidBitmap = null
+            lastValidBitmap?.recycle(); lastValidBitmap = null
             isScanning.set(false)
             binding.resultsContainer.visibility = View.GONE
             binding.cameraUiContainer.visibility = View.VISIBLE
-
             setUiEnabled(true)
         }
     }
 
-    // --- Removed Sensor Listener ---
-
     private fun setUiEnabled(isEnabled: Boolean) {
-        val alphaValue = if (isEnabled) 1.0f else 0.5f
+        val alpha = if (isEnabled) 1f else 0.5f
         binding.scanButton.isEnabled = isEnabled
-        binding.scanButton.alpha = alphaValue
-
+        binding.scanButton.alpha = alpha
         binding.zoomSlider.isEnabled = isEnabled
-        binding.zoomSlider.alpha = alphaValue
-
-        binding.flashlightButton.isEnabled = if (isEnabled) camera?.cameraInfo?.hasFlashUnit() ?: false else false
-        binding.flashlightButton.alpha = alphaValue
+        binding.zoomSlider.alpha = alpha
+        binding.flashlightButton.isEnabled = isEnabled && (camera?.cameraInfo?.hasFlashUnit() == true)
+        binding.flashlightButton.alpha = alpha
     }
-
 
     private fun requestPermissions() {
         activityResultLauncher.launch(REQUIRED_PERMISSIONS)
@@ -170,12 +150,9 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("ClickableViewAccessibility")
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-
         cameraProviderFuture.addListener({
             try {
-                val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
-
-                // --- FIX: Wait for the view to be laid out to get the ViewPort ---
+                val cameraProvider = cameraProviderFuture.get()
                 binding.cameraPreview.post {
                     val viewPort = binding.cameraPreview.viewPort ?: run {
                         Log.e(TAG, "ViewPort is null, cannot bind camera")
@@ -185,9 +162,7 @@ class MainActivity : AppCompatActivity() {
                     val preview = Preview.Builder()
                         .setTargetRotation(binding.cameraPreview.display.rotation)
                         .build()
-                        .also {
-                            it.setSurfaceProvider(binding.cameraPreview.surfaceProvider)
-                        }
+                        .also { it.setSurfaceProvider(binding.cameraPreview.surfaceProvider) }
 
                     val resolutionSelector = ResolutionSelector.Builder()
                         .setResolutionStrategy(
@@ -202,24 +177,19 @@ class MainActivity : AppCompatActivity() {
                         .setResolutionSelector(resolutionSelector)
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
-                        .also {
-                            it.setAnalyzer(cameraExecutor, ::analyzeImage)
-                        }
+                        .also { it.setAnalyzer(cameraExecutor, ::analyzeImage) }
 
-                    // --- FIX: Group UseCases and set the ViewPort ---
                     val useCaseGroup = UseCaseGroup.Builder()
                         .addUseCase(preview)
                         .addUseCase(imageAnalysis)
-                        .setViewPort(viewPort) // This links the zoom/crop of preview and analysis
+                        .setViewPort(viewPort)
                         .build()
 
-                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
                     cameraProvider.unbindAll()
+                    camera = cameraProvider.bindToLifecycle(
+                        this, CameraSelector.DEFAULT_BACK_CAMERA, useCaseGroup
+                    )
 
-                    // --- FIX: Bind the UseCaseGroup, not the individual cases ---
-                    camera = cameraProvider.bindToLifecycle(this, cameraSelector, useCaseGroup)
-
-                    // These must be called *after* the camera is bound
                     setupCameraControls()
                     binding.framingGuide.post { updateCropRect() }
 
@@ -233,8 +203,7 @@ class MainActivity : AppCompatActivity() {
                         }
                         true
                     }
-                } // End of cameraPreview.post
-
+                }
             } catch (exc: Exception) {
                 Log.e(TAG, "Use case binding failed", exc)
                 Toast.makeText(this, "Failed to start camera.", Toast.LENGTH_SHORT).show()
@@ -243,14 +212,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupCameraControls() {
-        val zoomState = camera?.cameraInfo?.zoomState?.value
-        if (zoomState != null) {
-            binding.zoomSlider.valueFrom = zoomState.minZoomRatio
-            binding.zoomSlider.valueTo = zoomState.maxZoomRatio
+        val zoom = camera?.cameraInfo?.zoomState?.value
+        if (zoom != null) {
+            binding.zoomSlider.valueFrom = zoom.minZoomRatio
+            binding.zoomSlider.valueTo = zoom.maxZoomRatio
             binding.zoomSlider.stepSize = 0.1f
-            binding.zoomSlider.value = zoomState.zoomRatio
-            binding.zoomSlider.addOnChangeListener { _, value, _ ->
-                camera?.cameraControl?.setZoomRatio(value)
+            binding.zoomSlider.value = zoom.zoomRatio
+            binding.zoomSlider.addOnChangeListener { _, v, _ ->
+                camera?.cameraControl?.setZoomRatio(v)
             }
         } else {
             binding.zoomSlider.visibility = View.GONE
@@ -258,31 +227,26 @@ class MainActivity : AppCompatActivity() {
 
         val hasFlash = camera?.cameraInfo?.hasFlashUnit() ?: false
         binding.flashlightButton.isEnabled = hasFlash
-        if(!hasFlash) {
-            binding.flashlightButton.alpha = 0.5f
-        }
+        if (!hasFlash) binding.flashlightButton.alpha = 0.5f
     }
 
     private fun updateCropRect() {
-        val previewView = binding.cameraPreview
-        val framingGuide = binding.framingGuide
-        val previewWidth = previewView.width
-        val previewHeight = previewView.height
-        val guideLeft = framingGuide.left
-        val guideTop = framingGuide.top
-        val guideWidth = framingGuide.width
-        val guideHeight = framingGuide.height
-
-        if (previewWidth > 0 && previewHeight > 0 && guideWidth > 0 && guideHeight > 0) {
-            cropRect = Rect(guideLeft, guideTop, guideLeft + guideWidth, guideTop + guideHeight)
+        val pv = binding.cameraPreview
+        val guide = binding.framingGuide
+        val pw = pv.width
+        val ph = pv.height
+        val gw = guide.width
+        val gh = guide.height
+        if (pw > 0 && ph > 0 && gw > 0 && gh > 0) {
+            cropRect = Rect(guide.left, guide.top, guide.left + gw, guide.top + gh)
         }
     }
 
     private fun toggleFlashlight() {
-        camera?.let {
-            if(it.cameraInfo.hasFlashUnit()) {
+        camera?.let { cam ->
+            if (cam.cameraInfo.hasFlashUnit()) {
                 isFlashlightOn = !isFlashlightOn
-                it.cameraControl.enableTorch(isFlashlightOn)
+                cam.cameraControl.enableTorch(isFlashlightOn)
                 binding.flashlightButton.setImageResource(
                     if (isFlashlightOn) R.drawable.ic_flashlight_on else R.drawable.ic_flashlight_off
                 )
@@ -292,59 +256,41 @@ class MainActivity : AppCompatActivity() {
 
     @OptIn(ExperimentalGetImage::class)
     private fun analyzeImage(imageProxy: ImageProxy) {
-        // --- REMOVED: isDeviceSteady check ---
-
         if (!isScanning.get()) {
             imageProxy.close()
             return
         }
 
-        // --- The bitmap received here is NOW correctly zoomed/cropped by the camera ---
         val fullBitmap = imageProxyToBitmap(imageProxy)
-        lastValidBitmap?.recycle() // Recycle previous full bitmap
-        lastValidBitmap = fullBitmap // Keep reference to the *uncropped* bitmap for display
+        lastValidBitmap?.recycle()
+        lastValidBitmap = fullBitmap
 
-        var imageToProcess: Bitmap? = null // Use nullable Bitmap
+        var imageToProcess: Bitmap? = null
         var isCropped = false
-        analysisCropRect = null // Reset analysis rect
+        analysisCropRect = null
 
-        // --- Our manual crop logic now crops from the *already-zoomed* image ---
         if (cropRect != null && fullBitmap.width > 0 && fullBitmap.height > 0) {
-            val previewWidth = binding.cameraPreview.width
-            val previewHeight = binding.cameraPreview.height
-
-            if (previewWidth == 0 || previewHeight == 0) {
+            val pvW = binding.cameraPreview.width
+            val pvH = binding.cameraPreview.height
+            if (pvW == 0 || pvH == 0) {
                 Log.e(TAG, "Preview dimensions are zero, cannot map crop rect.")
-                imageProxy.close()
-                return
+                imageProxy.close(); return
             }
-
-            // Map the on-screen framing box (in PreviewView coordinates)
-            // to the underlying bitmap coordinates assuming PreviewView's
-            // default scale type (FILL_CENTER). This handles center-crop
-            // and prevents reading outside the guide even with aspect-mismatch.
             val mapped = mapViewRectToBitmapRect(
-                cropRect!!,
-                previewWidth,
-                previewHeight,
-                fullBitmap.width,
-                fullBitmap.height
+                cropRect!!, pvW, pvH, fullBitmap.width, fullBitmap.height
             )
-
-            val finalLeft = mapped.left.coerceIn(0, fullBitmap.width)
-            val finalTop = mapped.top.coerceIn(0, fullBitmap.height)
-            val finalRight = mapped.right.coerceIn(0, fullBitmap.width)
-            val finalBottom = mapped.bottom.coerceIn(0, fullBitmap.height)
-
-            val finalWidth = (finalRight - finalLeft).coerceAtLeast(0)
-            val finalHeight = (finalBottom - finalTop).coerceAtLeast(0)
-
-            if (finalWidth > 0 && finalHeight > 0) {
+            val l = mapped.left.coerceIn(0, fullBitmap.width)
+            val t = mapped.top.coerceIn(0, fullBitmap.height)
+            val r = mapped.right.coerceIn(0, fullBitmap.width)
+            val b = mapped.bottom.coerceIn(0, fullBitmap.height)
+            val w = (r - l).coerceAtLeast(0)
+            val h = (b - t).coerceAtLeast(0)
+            if (w > 0 && h > 0) {
                 try {
-                    imageToProcess = Bitmap.createBitmap(fullBitmap, finalLeft, finalTop, finalWidth, finalHeight)
+                    imageToProcess = Bitmap.createBitmap(fullBitmap, l, t, w, h)
                     isCropped = true
-                    analysisCropRect = Rect(0, 0, finalWidth, finalHeight)
-                    Log.d(TAG, "Crop OK: [l=$finalLeft, t=$finalTop, w=$finalWidth, h=$finalHeight]")
+                    analysisCropRect = Rect(0, 0, w, h)
+                    Log.d(TAG, "Crop OK: [l=$l, t=$t, w=$w, h=$h]")
                 } catch (e: Exception) {
                     Log.e(TAG, "Bitmap cropping error: ${e.message}", e)
                 }
@@ -353,17 +299,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // --- FIX: If cropping fails, DO NOT process the full image. Skip the frame. ---
         if (imageToProcess == null) {
             Log.w(TAG, "Cropping failed or not attempted, skipping frame.")
-            imageProxy.close() // Make sure to close the proxy
-            return // EXIT THE FUNCTION
+            imageProxy.close(); return
         }
 
-        val enhancedBitmap = enhanceBitmapForOcr(imageToProcess) // Enhance the potentially cropped image
+        val enhancedBitmap = enhanceBitmapForOcr(imageToProcess)
         val image = InputImage.fromBitmap(enhancedBitmap, 0)
 
-        // Keep a color copy (same size as enhancedBitmap) for red detection
+        // Color reference for red detection (same crop)
         val colorRef = imageToProcess.copy(Bitmap.Config.ARGB_8888, false)
 
         textRecognizer.process(image)
@@ -383,18 +327,17 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
-    // --- Adaptive Thresholding Only (Sharpening Removed) ---
+    // Binarize + light 3x3 dilation to help thin glyphs like "1"
     private fun enhanceBitmapForOcr(bitmap: Bitmap): Bitmap {
-        val width = bitmap.width
-        val height = bitmap.height
-        if (width <= 0 || height <= 0) return bitmap
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= 0 || h <= 0) return bitmap
 
-        val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
 
-        var totalLuminance: Long = 0
+        var sum = 0L
         val gray = IntArray(pixels.size)
-
         for (i in pixels.indices) {
             val p = pixels[i]
             val r = Color.red(p)
@@ -402,51 +345,43 @@ class MainActivity : AppCompatActivity() {
             val b = Color.blue(p)
             val y = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
             gray[i] = y
-            totalLuminance += y
+            sum += y
         }
+        val avg = if (gray.isNotEmpty()) (sum / gray.size).toInt() else 128
+        val thr = (avg * 0.90).toInt()
 
-        val avg = if (gray.isNotEmpty()) (totalLuminance / gray.size).toInt() else 128
-        val threshold = (avg * 0.90).toInt() // slightly more foreground retained
-
-        // Binarize
         for (i in gray.indices) {
-            pixels[i] = if (gray[i] > threshold) Color.WHITE else Color.BLACK
+            pixels[i] = if (gray[i] > thr) Color.WHITE else Color.BLACK
         }
 
-        // --- NEW: Morphological Dilation (3x3) to fatten thin digits (especially "1") ---
-        val dilated = pixels.copyOf()
-        for (y in 1 until height - 1) {
-            for (x in 1 until width - 1) {
-                val idx = y * width + x
+        // 3x3 dilation
+        val outPx = pixels.copyOf()
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
+                val idx = y * w + x
                 if (pixels[idx] == Color.BLACK) {
-                    // If any neighbor is black, keep black
-                    var keepBlack = false
-                    for (dy in -1..1) for (dx in -1..1) {
-                        if (pixels[(y + dy) * width + (x + dx)] == Color.BLACK) {
-                            keepBlack = true
-                            break
+                    var keep = false
+                    loop@ for (dy in -1..1) for (dx in -1..1) {
+                        if (pixels[(y + dy) * w + (x + dx)] == Color.BLACK) {
+                            keep = true; break@loop
                         }
                     }
-                    dilated[idx] = if (keepBlack) Color.BLACK else Color.WHITE
+                    outPx[idx] = if (keep) Color.BLACK else Color.WHITE
                 }
             }
         }
 
-        val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        out.setPixels(dilated, 0, width, 0, 0, width, height)
-        return out
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also {
+            it.setPixels(outPx, 0, w, 0, 0, w, h)
+        }
     }
 
-    // --- REMOVED: applySharpeningFilter function ---
-
     private fun showResults(reading: String) {
-        if (lastValidBitmap != null && !lastValidBitmap!!.isRecycled) { // Check if bitmap is valid
-            // Display the *uncropped* bitmap saved earlier
-            binding.scannedImageView.setImageBitmap(lastValidBitmap)
-        } else {
-            binding.scannedImageView.setImageDrawable(null) // Clear if bitmap is invalid
-            Log.e(TAG, "lastValidBitmap was null or recycled in showResults")
-        }
+        lastValidBitmap?.let { bmp ->
+            if (!bmp.isRecycled) binding.scannedImageView.setImageBitmap(bmp)
+            else binding.scannedImageView.setImageDrawable(null)
+        } ?: run { binding.scannedImageView.setImageDrawable(null) }
+
         binding.fullScreenText.text = reading
         binding.resultsContainer.visibility = View.VISIBLE
         binding.cameraUiContainer.visibility = View.GONE
@@ -467,30 +402,22 @@ class MainActivity : AppCompatActivity() {
             if (System.currentTimeMillis() - scanStartTime > SCAN_TIMEOUT_MS) {
                 isScanning.set(false)
                 setUiEnabled(true)
-
                 val winner = lastFrameReading ?: readingVotes.maxByOrNull { it.value }?.key
-                if (winner != null) {
-                    showResults(winner)
-                } else {
-                    Toast.makeText(this, "Could not find a stable reading. Please try again.", Toast.LENGTH_SHORT).show()
-                    if (isFlashlightOn) {
-                        camera?.cameraControl?.enableTorch(false)
-                        isFlashlightOn = false
-                        binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
-                    }
+                if (winner != null) showResults(winner)
+                else Toast.makeText(this, "Could not find a stable reading. Please try again.", Toast.LENGTH_SHORT).show()
+                if (isFlashlightOn) {
+                    camera?.cameraControl?.enableTorch(false)
+                    isFlashlightOn = false
+                    binding.flashlightButton.setImageResource(R.drawable.ic_flashlight_off)
                 }
                 return@runOnUiThread
             }
 
             if (currentReading != null) {
-                // --- NEW: Stability check using character similarity ---
-                if (lastFrameReading != null) {
-                    val d = textDistance(lastFrameReading!!, currentReading)
-                    if (d <= 2) {
-                        readingStabilityScore++
-                    } else {
-                        readingStabilityScore = 0
-                    }
+                // Temporal stability via Levenshtein distance
+                lastFrameReading?.let { prev ->
+                    val d = textDistance(prev, currentReading)
+                    readingStabilityScore = if (d <= 2) readingStabilityScore + 1 else 0
                 }
                 lastFrameReading = currentReading
 
@@ -501,10 +428,9 @@ class MainActivity : AppCompatActivity() {
                     return@runOnUiThread
                 }
 
-                val currentVotes = readingVotes.getOrDefault(currentReading, 0) + 1
-                readingVotes[currentReading] = currentVotes
-
-                if (currentVotes >= REQUIRED_VOTES_TO_WIN) {
+                val votes = readingVotes.getOrDefault(currentReading, 0) + 1
+                readingVotes[currentReading] = votes
+                if (votes >= REQUIRED_VOTES_TO_WIN) {
                     isScanning.set(false)
                     setUiEnabled(true)
                     showResults(currentReading)
@@ -513,7 +439,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // --- Levenshtein distance ---
+    // Levenshtein
     private fun textDistance(a: String, b: String): Int {
         val dp = Array(a.length + 1) { IntArray(b.length + 1) }
         for (i in a.indices) dp[i + 1][0] = i + 1
@@ -525,11 +451,9 @@ class MainActivity : AppCompatActivity() {
         return dp[a.length][b.length]
     }
 
-
-
-    // --- Updated cleanText: ONLY does character swaps and space removal ---
-    private fun cleanText(text: String): String {
-        return text.uppercase()
+    // OCR cleanup (no digit filtering here—done later)
+    private fun cleanText(text: String): String =
+        text.uppercase()
             .replace("O", "0")
             .replace("I", "1")
             .replace("L", "1")
@@ -538,12 +462,10 @@ class MainActivity : AppCompatActivity() {
             .replace("B", "8")
             .replace("G", "6")
             .replace("Q", "0")
-            .replace(",", ".") // replace comma with dot
-            .replace(" ", "") // remove spaces
-        // DO NOT filter digits or remove decimals here
-    }
+            .replace(",", ".")
+            .replace(" ", "")
 
-    // Detect if a region is predominantly red (works for red fill or strong red border)
+    // Region is red (fill or strong red border)
     private fun isRegionRed(bmp: Bitmap, rectIn: Rect): Boolean {
         if (bmp.width <= 0 || bmp.height <= 0) return false
         val rect = Rect(
@@ -556,23 +478,18 @@ class MainActivity : AppCompatActivity() {
 
         var reds = 0
         var total = 0
-        // coarse grid sampling to keep fast
         val stepX = max(1, rect.width() / 24)
         val stepY = max(1, rect.height() / 12)
-
         for (y in rect.top until rect.bottom step stepY) {
             for (x in rect.left until rect.right step stepX) {
                 val c = bmp.getPixel(x, y)
                 val r = Color.red(c); val g = Color.green(c); val b = Color.blue(c)
-                // red dominance threshold: robust to lighting
-                if (r > 120 && r > (g + b) * 0.9 && r > max(g, b) * 1.25) {
-                    reds++
-                }
+                if (r > 120 && r > (g + b) * 0.9 && r > max(g, b) * 1.25) reds++
                 total++
             }
         }
         val ratio = if (total == 0) 0f else reds.toFloat() / total
-        return ratio > 0.18f  // tuneable
+        return ratio > 0.18f
     }
 
     private fun rightSlice(box: Rect, w: Int): Rect {
@@ -586,13 +503,13 @@ class MainActivity : AppCompatActivity() {
         return Rect(r.left + dx, r.top + dy, r.right - dx, r.bottom - dy)
     }
 
-    // --- NEW: Parsing Logic with Element Stitching AND Font Size Consistency ---
+    // Core extraction with stitching, font consistency, and red-tail filtering
     private fun extractMeterReading(result: Text, analysisCropRect: Rect?, colorBitmap: Bitmap): String? {
         val allElements = result.textBlocks
             .flatMap { it.lines }
             .flatMap { it.elements }
-            .filter { element ->
-                val box = element.boundingBox
+            .filter { el ->
+                val box = el.boundingBox
                 analysisCropRect != null && box != null &&
                         analysisCropRect.contains(box.left, box.top) &&
                         analysisCropRect.contains(box.right, box.bottom)
@@ -601,72 +518,51 @@ class MainActivity : AppCompatActivity() {
 
         val units = setOf("KWH", "KVAH", "MD")
         val imageCenterY = analysisCropRect.centerY()
-        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""") // 4-7 digits
+        val validReadingPattern = Regex("""\b(0*\d{4,7})\b""")
 
-        // 1. Find all potential units
-        val unitCandidates = allElements.mapNotNull { element ->
-            if ((element.confidence ?: 0f) < 0.3f) return@mapNotNull null
-            val unitCandidateText = element.text.uppercase()
-            if (units.any { unitCandidateText.contains(it) }) {
-                Pair(unitCandidateText, element.boundingBox)
-            } else {
-                null
-            }
+        val unitCandidates = allElements.mapNotNull { el ->
+            if ((el.confidence ?: 0f) < 0.3f) return@mapNotNull null
+            val text = el.text.uppercase()
+            if (units.any { text.contains(it) }) Pair(text, el.boundingBox) else null
         }
 
-        // 2. Find all number elements and clean them
         val numberElements = allElements
-            .sortedBy { it.boundingBox?.left ?: 0 } // Sort left-to-right
-            .map { Pair(cleanText(it.text), it) } // Clean text
-            .filter { (it.first.matches(Regex("""^[\d\.]+$"""))) && (it.second.confidence ?: 0f) >= 0.3f } // Keep only numbers/decimals
+            .sortedBy { it.boundingBox?.left ?: 0 }
+            .map { cleanText(it.text) to it }
+            .filter { (txt, el) -> txt.matches(Regex("""^[\n\r\t\d\.]+$""")) && (el.confidence ?: 0f) >= 0.3f }
 
-        // 3. Stitch adjacent number elements
         val stitchedCandidates = stitchAdjacentElements(numberElements)
-
-        // 4. --- NEW: Filter by Font Size Consistency ---
         if (stitchedCandidates.isEmpty()) return null
 
         val maxElementHeight = stitchedCandidates.maxOfOrNull { it.height } ?: 0
-        if (maxElementHeight == 0) return null // No valid elements found
+        if (maxElementHeight == 0) return null
 
-        // --- THIS IS THE STRICT FONT SIZE LOGIC ---
-        // Keep only elements that are at least 92% of the max height (aggressively drop small text)
-        val heightThreshold = (maxElementHeight * 0.80f) // allow 30% variation for mechanical wheels
-        val mostConsistentGroup = stitchedCandidates.filter {
-            it.box != null && it.height > 6 && it.height >= heightThreshold
-        }
+        // Allow some variation (mechanical wheels not uniform)
+        val heightThreshold = (maxElementHeight * 0.80f)
+        val mainGroup = stitchedCandidates.filter { it.box != null && it.height > 6 && it.height >= heightThreshold }
+        if (mainGroup.isEmpty()) return null
 
-        if (mostConsistentGroup.isEmpty()) {
-            Log.w(TAG, "No candidates passed the strict height filter (>=92% of max).")
-            return null
-        }
-
-        // 5. Score all candidates *from the most consistent group*
         val finalCandidates = mutableListOf<ReadingCandidate>()
-        for ((numberString, box, height) in mostConsistentGroup) {
+        for ((numberString, box, height) in mainGroup) {
             var cleanedNum = numberString
             val h = height.toFloat()
             val w = (box?.width() ?: 0).toFloat()
             val avgDigitW = if (cleanedNum.isNotEmpty()) w / cleanedNum.length else w
 
-            // 1) Stronger size-based check for mechanical fractional wheel
+            // 1) likely fractional wheel (smaller last digit)
             val likelyFractionalTail = cleanedNum.length >= 5 && (
-                    h < maxElementHeight * 0.92f ||
-                            avgDigitW < h * 0.62f
+                    h < maxElementHeight * 0.92f || avgDigitW < h * 0.62f
                     )
 
-            // 2) Pixel-color red check (works for full red fill AND red border only)
+            // 2) red last-digit (fill or border)
             var redTail = false
             if (box != null && cleanedNum.length >= 2) {
                 val lastW = avgDigitW.toInt().coerceAtLeast(2)
                 val lastRect = rightSlice(box, lastW)
-                val inner = insetPct(lastRect, 0.12f)     // center region of last digit
+                val inner = insetPct(lastRect, 0.12f)
                 val redFill = isRegionRed(colorBitmap, inner)
-
-                // detect red border if center is not red
                 val border = Rect(lastRect).apply { inset(-(lastW * 0.25f).toInt(), 0) }
                 val redEdge = !redFill && isRegionRed(colorBitmap, border)
-
                 redTail = redFill || redEdge
             }
 
@@ -674,22 +570,19 @@ class MainActivity : AppCompatActivity() {
                 cleanedNum = cleanedNum.dropLast(1)
             }
 
-            // keep only digits before decimal
             val finalCleanedNumber = cleanedNum.substringBefore('.')
                 .replace(Regex("[^0-9]"), "")
 
             if (finalCleanedNumber.matches(validReadingPattern)) {
                 val candidate = ReadingCandidate(finalCleanedNumber, box, height)
 
-                // P1: Spatial unit proximity
-                for ((_, unitBox) in unitCandidates) {
+                unitCandidates.forEach { (_, unitBox) ->
                     if (isUnitSpatiallyClose(candidate.box, unitBox)) {
                         candidate.score += 10
-                        break
+                        return@forEach
                     }
                 }
 
-                // P2: Vertical centering importance
                 if (box != null && abs(box.centerY() - imageCenterY) < (imageCenterY * 0.25)) {
                     candidate.score += 1
                 }
@@ -698,125 +591,72 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (finalCandidates.isEmpty()) {
-            Log.w(TAG, "No candidates passed validation after scoring.")
-            return null
-        }
+        if (finalCandidates.isEmpty()) return null
 
-        // 6. Find the best candidate
         val maxScore = finalCandidates.maxOfOrNull { it.score } ?: 0
-
-        val topCandidates = if (maxScore > 0) {
-            finalCandidates.filter { it.score == maxScore } // Get all with max score
-        } else {
-            finalCandidates // If no one scored, consider all from the consistent group
-        }
-
-        // Among the top candidates, return the longest one
-        return topCandidates.maxByOrNull { it.number.length }?.number
+        val top = if (maxScore > 0) finalCandidates.filter { it.score == maxScore } else finalCandidates
+        return top.maxByOrNull { it.number.length }?.number
     }
 
-    // --- Helper: map a PreviewView rect to bitmap rect for FILL_CENTER behavior ---
+    // Map PreviewView rect to bitmap rect for FILL_CENTER behavior
     private fun mapViewRectToBitmapRect(viewRect: Rect, viewW: Int, viewH: Int, bmpW: Int, bmpH: Int): Rect {
         if (viewW <= 0 || viewH <= 0 || bmpW <= 0 || bmpH <= 0) return Rect(0, 0, bmpW, bmpH)
-
-        // Scale used by PreviewView to draw image (FILL_CENTER):
-        // image is scaled by s so that it fills the view; larger dimension crops.
-        val scale = max(viewW.toFloat() / bmpW.toFloat(), viewH.toFloat() / bmpH.toFloat())
-
-        // Displayed image size inside the view after scaling
+        val scale = max(viewW.toFloat() / bmpW, viewH.toFloat() / bmpH)
         val dispW = bmpW * scale
         val dispH = bmpH * scale
-
-        // Because of center-crop, portions may be cut off. Compute offsets so we can
-        // translate from view coords to image coords.
         val offX = (dispW - viewW) / 2f
         val offY = (dispH - viewH) / 2f
-
-        fun mapX(x: Int): Int = ((x + offX) / scale).toInt()
-        fun mapY(y: Int): Int = ((y + offY) / scale).toInt()
-
-        val left = mapX(viewRect.left).coerceIn(0, bmpW)
-        val top = mapY(viewRect.top).coerceIn(0, bmpH)
-        val right = mapX(viewRect.right).coerceIn(0, bmpW)
-        val bottom = mapY(viewRect.bottom).coerceIn(0, bmpH)
-
-        return Rect(min(left, right), min(top, bottom), max(left, right), max(top, bottom))
+        fun mapX(x: Int) = ((x + offX) / scale).toInt()
+        fun mapY(y: Int) = ((y + offY) / scale).toInt()
+        val l = mapX(viewRect.left).coerceIn(0, bmpW)
+        val t = mapY(viewRect.top).coerceIn(0, bmpH)
+        val r = mapX(viewRect.right).coerceIn(0, bmpW)
+        val b = mapY(viewRect.bottom).coerceIn(0, bmpH)
+        return Rect(min(l, r), min(t, b), max(l, r), max(t, b))
     }
 
-    // --- Helper function to stitch number elements ---
     private fun stitchAdjacentElements(elements: List<Pair<String, Text.Element>>): List<ReadingCandidate> {
-        val stitchedList = mutableListOf<ReadingCandidate>()
+        val stitched = mutableListOf<ReadingCandidate>()
         var i = 0
         while (i < elements.size) {
-            var currentText = elements[i].first
-            var currentBox = elements[i].second.boundingBox?.let { Rect(it) } // Make a copy
-            var currentHeight = currentBox?.height() ?: 0
+            var txt = elements[i].first
+            var box = elements[i].second.boundingBox?.let { Rect(it) }
+            var h = box?.height() ?: 0
             var j = i + 1
-
-            // Check next elements
             while (j < elements.size) {
-                val nextText = elements[j].first
-                val nextBox = elements[j].second.boundingBox
-                if (currentBox == null || nextBox == null) break // Can't compare
-
-                if (nextText.matches(Regex("""^[\d\.]+$"""))) {
-                    val horizontalGap = nextBox.left - currentBox.right
-                    val verticalOverlap = max(0, min(currentBox.bottom, nextBox.bottom) - max(currentBox.top, nextBox.top))
-
-                    // Stitch if horizontally adjacent (gap < 2.0x height) AND vertical overlap > 30%
-                    if (horizontalGap < (currentHeight * 2.0) && verticalOverlap > (currentHeight * 0.3)) {
-                        currentText += nextText // Stitch text
-                        currentBox.right = nextBox.right // Extend box
-                        currentBox.top = min(currentBox.top, nextBox.top) // Extend box
-                        currentBox.bottom = max(currentBox.bottom, nextBox.bottom) // Extend box
-                        currentHeight = max(currentHeight, nextBox.height()) // Use max height
-                        j++ // Keep checking next element
-                    } else {
-                        break // Not adjacent, stop stitching
-                    }
-                } else {
-                    break // Not a number, stop stitching
-                }
+                val nextTxt = elements[j].first
+                val nextBox = elements[j].second.boundingBox ?: break
+                val curBox = box ?: break
+                if (nextTxt.matches(Regex("""^[\d\.]+$"""))) {
+                    val gap = nextBox.left - curBox.right
+                    val vOverlap = max(0, min(curBox.bottom, nextBox.bottom) - max(curBox.top, nextBox.top))
+                    if (gap < h * 2.0 && vOverlap > h * 0.3) {
+                        txt += nextTxt
+                        curBox.right = nextBox.right
+                        curBox.top = min(curBox.top, nextBox.top)
+                        curBox.bottom = max(curBox.bottom, nextBox.bottom)
+                        h = max(h, nextBox.height())
+                        j++
+                    } else break
+                } else break
             }
-            stitchedList.add(ReadingCandidate(currentText, currentBox, currentHeight))
-            i = j // Move to the next unstitch element
+            stitched.add(ReadingCandidate(txt, box, h))
+            i = j
         }
-        return stitchedList
+        return stitched
     }
 
-
-    /**
-     * Checks if a unit is spatially close to a number (left, right, or top).
-     * Increased tolerance.
-     */
     private fun isUnitSpatiallyClose(numberBox: Rect?, unitBox: Rect?): Boolean {
         if (numberBox == null || unitBox == null) return false
-
-        val toleranceX = numberBox.width() * 5
-        val toleranceY = numberBox.height() * 2
-
-        // 1. Check Right
-        val isVerticallyAlignedRight = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
-        val isToTheRight = unitBox.left > numberBox.right
-        val isCloseHorizontallyRight = (unitBox.left - numberBox.right) < toleranceX
-        if (isVerticallyAlignedRight && isToTheRight && isCloseHorizontallyRight) return true
-
-        // 2. Check Left
-        val isVerticallyAlignedLeft = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
-        val isToTheLeft = numberBox.left > unitBox.right // Corrected condition
-        val isCloseHorizontallyLeft = (numberBox.left - unitBox.right) < toleranceX
-        if (isVerticallyAlignedLeft && isToTheLeft && isCloseHorizontallyLeft) return true
-
-        // 3. Check Top
-        val isHorizontallyAlignedTop = abs(numberBox.centerX() - unitBox.centerX()) < numberBox.width()
-        val isAbove = numberBox.top > unitBox.bottom
-        val isCloseVertically = (numberBox.top - unitBox.bottom) < toleranceY
-        if (isHorizontallyAlignedTop && isAbove && isCloseVertically) return true
-
-        return false
+        val tolX = numberBox.width() * 5
+        val tolY = numberBox.height() * 2
+        val verticalAligned = abs(numberBox.centerY() - unitBox.centerY()) < numberBox.height()
+        val right = unitBox.left > numberBox.right && (unitBox.left - numberBox.right) < tolX && verticalAligned
+        val left = numberBox.left > unitBox.right && (numberBox.left - unitBox.right) < tolX && verticalAligned
+        val topAligned = abs(numberBox.centerX() - unitBox.centerX()) < numberBox.width()
+        val top = numberBox.top > unitBox.bottom && (numberBox.top - unitBox.bottom) < tolY && topAligned
+        return right || left || top
     }
-
 
     @OptIn(ExperimentalGetImage::class)
     private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
@@ -834,25 +674,14 @@ class MainActivity : AppCompatActivity() {
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
         val out = ByteArrayOutputStream()
         yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 100, out)
-        val imageBytes = out.toByteArray()
-        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+        val bytes = out.toByteArray()
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()) }
-        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-    }
-
-    override fun onPause() {
-        super.onPause()
-        // --- Removed Sensor Un-registration ---
-    }
-
-    override fun onResume() {
-        super.onResume()
-        // --- Removed Sensor Registration ---
+        return Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // --- Removed Sensor Un-registration ---
         cameraExecutor.shutdown()
         textRecognizer.close()
         lastValidBitmap?.recycle()
