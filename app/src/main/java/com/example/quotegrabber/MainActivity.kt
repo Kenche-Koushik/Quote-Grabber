@@ -74,7 +74,7 @@ class MainActivity : AppCompatActivity() {
     // --- NEW: OCR stability lock ---
     private var lastFrameReading: String? = null
     private var readingStabilityScore = 0
-    private val STABILITY_THRESHOLD = 6
+    private val STABILITY_THRESHOLD = 3
     private val REQUIRED_VOTES_TO_WIN = 2
     private val SCAN_TIMEOUT_MS = 3000L
     private var scanStartTime = 0L
@@ -486,7 +486,7 @@ class MainActivity : AppCompatActivity() {
                 // --- NEW: Stability check using character similarity ---
                 if (lastFrameReading != null) {
                     val d = textDistance(lastFrameReading!!, currentReading)
-                    if (d <= 1) {
+                    if (d <= 2) {
                         readingStabilityScore++
                     } else {
                         readingStabilityScore = 0
